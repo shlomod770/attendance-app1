@@ -90,28 +90,32 @@ async function doLogin(){
   renderScan();
 }
 
+// Single "stage" area: shows either the big scan button, the live camera, or a result message.
 function renderScan(){
   root.innerHTML = `
     <div class="card center">
       <p class="muted">Здравейте, <b>${currentEmployee.name || currentEmployee.username}</b></p>
     </div>
-    <button class="stamp" id="btn-scan">
-      <div class="lbl">СКАНИРАЙ QR</div>
-      <div class="clock-digits">за вход / изход</div>
-    </button>
-    <div class="card" id="note-card" style="margin-top:14px;">
-      <label>Съобщение до управителя (по желание)</label>
-      <textarea id="f-note" rows="2" placeholder="напр. проблем по време на смяната..."></textarea>
-      <button class="btn btn-ghost btn-sm" id="btn-send-note" style="margin-top:8px;">Изпрати съобщение</button>
+    <div id="stage"></div>
+    <div class="row between" style="margin-top:22px;">
+      <a href="#" id="link-note" class="muted" style="font-size:12px;text-decoration:underline;">Съобщение до управителя</a>
+      <a href="#" id="btn-logout" class="muted" style="font-size:12px;text-decoration:underline;">Изход от акаунта</a>
     </div>
-    <button class="btn btn-ghost" id="btn-logout" style="margin-top:20px;">Изход от акаунта</button>
-    <div id="scan-area"></div>
+    <div id="note-box" class="hidden" style="margin-top:10px;">
+      <textarea id="f-note" rows="2" placeholder="напр. проблем по време на смяната..." style="font-size:13px;"></textarea>
+      <button class="btn btn-ghost btn-sm" id="btn-send-note" style="margin-top:6px;">Изпрати</button>
+    </div>
   `;
-  document.getElementById('btn-scan').onclick = openScanner;
-  document.getElementById('btn-logout').onclick = ()=>{
+  renderStageButton();
+  document.getElementById('btn-logout').onclick = (e)=>{
+    e.preventDefault();
     localStorage.removeItem(LS_SESSION);
     currentEmployee = null;
     renderLogin();
+  };
+  document.getElementById('link-note').onclick = (e)=>{
+    e.preventDefault();
+    document.getElementById('note-box').classList.toggle('hidden');
   };
   document.getElementById('btn-send-note').onclick = async ()=>{
     const txt = document.getElementById('f-note').value.trim();
@@ -123,16 +127,33 @@ function renderScan(){
       createdAt: firebase.firestore.FieldValue.serverTimestamp()
     });
     document.getElementById('f-note').value = '';
+    document.getElementById('note-box').classList.add('hidden');
     toast('Съобщението е изпратено');
   };
+}
+
+function renderStageButton(){
+  const stage = document.getElementById('stage');
+  stage.innerHTML = `
+    <button class="stamp" id="btn-scan">
+      <div class="lbl">СКАНИРАЙ QR</div>
+      <div class="clock-digits">за вход / изход</div>
+    </button>
+  `;
+  document.getElementById('btn-scan').onclick = openScanner;
 }
 
 let qrScanner = null;
 
 function openScanner(){
-  const area = document.getElementById('scan-area');
-  area.innerHTML = `<div class="card"><div id="qr-reader"></div><button class="btn btn-ghost" id="btn-cancel-scan" style="margin-top:10px;">Отказ</button></div>`;
-  document.getElementById('btn-cancel-scan').onclick = stopScanner;
+  const stage = document.getElementById('stage');
+  stage.innerHTML = `
+    <div class="card" style="padding:8px;">
+      <div id="qr-reader"></div>
+      <button class="btn btn-ghost" id="btn-cancel-scan" style="margin-top:10px;">Отказ</button>
+    </div>
+  `;
+  document.getElementById('btn-cancel-scan').onclick = ()=>{ stopScanner(); renderStageButton(); };
   qrScanner = new Html5Qrcode('qr-reader');
   qrScanner.start(
     { facingMode: 'environment' },
@@ -140,7 +161,8 @@ function openScanner(){
     onScanSuccess,
     ()=>{}
   ).catch(err=>{
-    area.innerHTML = `<div class="card"><p class="muted">Няма достъп до камерата. Проверете разрешенията на телефона.</p></div>`;
+    stage.innerHTML = `<div class="card center"><p class="muted">Няма достъп до камерата. Проверете разрешенията на телефона.</p><button class="btn btn-ghost" id="btn-back-err" style="margin-top:10px;">Назад</button></div>`;
+    document.getElementById('btn-back-err').onclick = renderStageButton;
   });
 }
 
@@ -149,7 +171,6 @@ function stopScanner(){
     qrScanner.stop().then(()=>qrScanner.clear()).catch(()=>{});
     qrScanner = null;
   }
-  document.getElementById('scan-area').innerHTML = '';
 }
 
 async function onScanSuccess(decodedText){
@@ -183,7 +204,7 @@ async function processScan(){
       needsReview: false,
       note: ''
     });
-    showResult('Вход регистриран', `Час: ${fmtTime(now)}`);
+    showResult(true, `Час: ${fmtTime(now)}`);
     return;
   }
 
@@ -201,7 +222,7 @@ async function processScan(){
       needsReview: false,
       note: ''
     });
-    showResult('Вход регистриран', `Час: ${fmtTime(now)}`);
+    showResult(true, `Час: ${fmtTime(now)}`);
     return;
   }
 
@@ -212,23 +233,24 @@ async function processScan(){
   const h = Math.floor(durationH);
   const m = Math.round((durationH - h) * 60);
   const dayNote = sameDay(checkIn, now) ? '' : ` (${fmtDate(now)})`;
-  showResult('Изход регистриран', `
+  showResult(false, `
     Вход: ${fmtTime(checkIn)}<br>
     Изход: ${fmtTime(now)}${dayNote}<br>
-    Общо часове: ${h} ч ${m} мин
+    <b>Общо часове: ${h} ч ${m} мин</b>
   `);
 }
 
-function showResult(title, bodyHtml){
-  const area = document.getElementById('scan-area');
-  area.innerHTML = `
-    <div class="card center" style="margin-top:14px;">
-      <h2>${title}</h2>
+function showResult(isCheckIn, bodyHtml){
+  const stage = document.getElementById('stage');
+  const title = isCheckIn ? 'Вашето влизане е регистрирано ✓' : 'Вашето излизане е регистрирано ✓';
+  stage.innerHTML = `
+    <div class="card center">
+      <h2 style="font-size:24px;">${title}</h2>
       <p class="mono" style="line-height:1.9;">${bodyHtml}</p>
       <button class="btn btn-primary" id="btn-ok" style="margin-top:10px;">Готово</button>
     </div>
   `;
-  document.getElementById('btn-ok').onclick = ()=>{ area.innerHTML = ''; };
+  document.getElementById('btn-ok').onclick = renderStageButton;
 }
 
 init();
