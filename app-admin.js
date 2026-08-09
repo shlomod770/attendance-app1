@@ -659,22 +659,25 @@ function openDetailEntry(empId){
   };
 }
 
-function openPaymentForm(empId, paymentId){
+function openPaymentForm(empId, paymentId, isNav){
   const emp = state.employees.find(e=>e.id===empId);
   const life = employeeLifetimeStats(empId);
   const existing = paymentId ? state.payments.find(p=>p.id===paymentId) : null;
   const today = toInputDate(new Date());
   const existDate = existing ? (existing.date.toDate?existing.date.toDate():new Date(existing.date)) : null;
 
-  // Default "which week" to whatever week the existing payment was tagged with;
-  // for a new payment, if today is the pay-period start day (e.g. Friday) default
-  // to the week that JUST ENDED, since that's normally what a same-day payment covers.
-  if(!existing){
-    const todayIsPeriodStart = new Date().getDay() === state.config.periodStartDay;
-    state.periodOffset = todayIsPeriodStart ? 1 : 0;
-  } else if(existing.periodKey){
-    const wStart = new Date(existing.periodKey + 'T00:00:00');
-    state.periodOffset = Math.round((currentPeriodStart() - wStart) / (7*86400000));
+  // Only set the default "which week" once, when the form is first opened —
+  // navigating with the arrows must never get overridden by this again.
+  if(!isNav){
+    if(!existing){
+      const todayIsPeriodStart = new Date().getDay() === state.config.periodStartDay;
+      state.periodOffset = todayIsPeriodStart ? 1 : 0;
+    } else if(existing.periodKey){
+      const wStart = new Date(existing.periodKey + 'T00:00:00');
+      state.periodOffset = Math.round((currentPeriodStart() - wStart) / (7*86400000));
+    } else {
+      state.periodOffset = 0;
+    }
   }
   const weekStart = periodStartAtOffset(state.periodOffset);
 
@@ -705,8 +708,8 @@ function openPaymentForm(empId, paymentId){
       </div>
     </div>
   `;
-  document.getElementById('btn-prev-w').onclick = ()=>{ state.periodOffset++; openPaymentForm(empId, paymentId); };
-  document.getElementById('btn-next-w').onclick = ()=>{ if(state.periodOffset>0){ state.periodOffset--; openPaymentForm(empId, paymentId); } };
+  document.getElementById('btn-prev-w').onclick = ()=>{ state.periodOffset++; openPaymentForm(empId, paymentId, true); };
+  document.getElementById('btn-next-w').onclick = ()=>{ if(state.periodOffset>0){ state.periodOffset--; openPaymentForm(empId, paymentId, true); } };
   if(!existing){
     document.getElementById('btn-full').onclick = ()=>{
       document.getElementById('f-amount').value = life.remaining>0?life.remaining.toFixed(2):0;
