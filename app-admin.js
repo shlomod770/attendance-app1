@@ -76,6 +76,10 @@ async function loadAll(){
   }
 }
 function genToken(){ return 'shop-' + Math.random().toString(36).slice(2) + Date.now().toString(36); }
+function displayName(e){
+  if(!e) return '';
+  return e.nameHe ? `${e.name} (${e.nameHe})` : e.name;
+}
 
 // ---------- shift helpers ----------
 function shiftDurationHours(s){
@@ -91,6 +95,10 @@ function shiftEffectiveDate(s){
   return s.checkIn.toDate ? s.checkIn.toDate() : new Date(s.checkIn);
 }
 function isCountable(s){ return s.manualTotalHours != null || !!s.checkOut; }
+function paymentEffectiveDate(p){
+  if(p.periodKey) return new Date(p.periodKey + 'T00:00:00');
+  return p.date && p.date.toDate ? p.date.toDate() : new Date(p.date);
+}
 
 // ---------- lifetime (global) balance — the single clear "how much do I owe now" number ----------
 function employeeLifetimeStats(empId){
@@ -113,9 +121,9 @@ function statsForRange(empId, startDate, endDateExcl){
   });
   const hours = shifts.reduce((s,sh)=>s+shiftDurationHours(sh),0);
   const pays = state.payments.filter(p=>{
-    if(p.employeeId !== empId || !p.date) return false;
-    const d = p.date.toDate ? p.date.toDate() : new Date(p.date);
-    return d >= startDate && d < endDateExcl;
+    if(p.employeeId !== empId) return false;
+    const d = paymentEffectiveDate(p);
+    return d && d >= startDate && d < endDateExcl;
   });
   const paid = pays.reduce((s,p)=>s+(p.amount||0),0);
   const earned = hours*rate;
@@ -248,7 +256,7 @@ function renderDashboard(){
       <h3>דורש תשומת לב</h3>
       ${alerts.map(e=>`
         <div class="row between" style="margin-top:8px;cursor:pointer;" data-goto="${e.id}">
-          <span>${e.name}</span>
+          <span>${displayName(e)}</span>
           <span>
             ${hasOpenShift(e.id)?'<span class="tag tag-open">משמרת פתוחה</span> ':''}
             ${hasReviewShift(e.id)?'<span class="tag tag-review">דורש בדיקה</span>':''}
@@ -278,7 +286,7 @@ function renderEmployees(){
     card.innerHTML = `
       <div class="row between" style="cursor:pointer;" data-open="${e.id}">
         <div>
-          <b>${e.name}</b> ${e.active===false?'<span class="tag tag-off">מושבת</span>':''}
+          <b>${displayName(e)}</b> ${e.active===false?'<span class="tag tag-off">מושבת</span>':''}
           ${hasOpenShift(e.id)?'<span class="tag tag-open">משמרת פתוחה</span>':''}
           ${hasReviewShift(e.id)?'<span class="tag tag-review">דורש בדיקה</span>':''}
           <div class="muted">משתמש: ${e.username} · ${money(e.hourlyRate)}/שעה</div>
@@ -301,7 +309,8 @@ function openEmployeeForm(empId){
   root.innerHTML = `
     <div class="card">
       <h2>${emp?'עריכת עובד':'עובד חדש'}</h2>
-      <label>שם</label><input id="f-name" value="${emp?emp.name:''}">
+      <label>שם (כפי שנרשם/מוצג לעובד — בולגרית/אנגלית וכו')</label><input id="f-name" value="${emp?emp.name:''}">
+      <label>שם בעברית (לשימוש שלך בלבד, לא מוצג לעובד)</label><input id="f-namehe" value="${emp?(emp.nameHe||''):''}">
       <label>שם משתמש (לכניסה)</label><input id="f-username" value="${emp?emp.username:''}">
       <label>קוד אישי</label><input id="f-pin" value="${emp?emp.pin:''}">
       <label>שכר לשעה (€)</label><input id="f-rate" type="number" step="0.01" value="${emp?emp.hourlyRate:''}">
@@ -317,6 +326,7 @@ function openEmployeeForm(empId){
   document.getElementById('btn-save-emp').onclick = async ()=>{
     const data = {
       name: document.getElementById('f-name').value.trim(),
+      nameHe: document.getElementById('f-namehe').value.trim(),
       username: document.getElementById('f-username').value.trim(),
       pin: document.getElementById('f-pin').value.trim(),
       hourlyRate: parseFloat(document.getElementById('f-rate').value) || 0,
@@ -352,7 +362,7 @@ function renderEmployeeDetail(empId){
     <div class="card">
       <div class="row between">
         <div>
-          <h2>${emp.name}</h2>
+          <h2>${displayName(emp)}</h2>
           <span class="muted">${emp.username} · ${money(emp.hourlyRate)}/שעה</span>
           ${emp.active===false?' <span class="tag tag-off">מושבת</span>':''}
           ${hasOpenShift(emp.id)?' <span class="tag tag-open">משמרת פתוחה</span>':''}
@@ -655,14 +665,36 @@ function openPaymentForm(empId, paymentId){
   const existing = paymentId ? state.payments.find(p=>p.id===paymentId) : null;
   const today = toInputDate(new Date());
   const existDate = existing ? (existing.date.toDate?existing.date.toDate():new Date(existing.date)) : null;
+
+  // Default "which week" to whatever week the existing payment was tagged with;
+  // for a new payment, if today is the pay-period start day (e.g. Friday) default
+  // to the week that JUST ENDED, since that's normally what a same-day payment covers.
+  if(!existing){
+    const todayIsPeriodStart = new Date().getDay() === state.config.periodStartDay;
+    state.periodOffset = todayIsPeriodStart ? 1 : 0;
+  } else if(existing.periodKey){
+    const wStart = new Date(existing.periodKey + 'T00:00:00');
+    state.periodOffset = Math.round((currentPeriodStart() - wStart) / (7*86400000));
+  }
+  const weekStart = periodStartAtOffset(state.periodOffset);
+
   root.innerHTML = `
     <div class="card">
-      <h2>${existing?'עריכת תשלום':'רישום תשלום'} — ${emp.name}</h2>
+      <h2>${existing?'עריכת תשלום':'רישום תשלום'} — ${displayName(emp)}</h2>
       <p class="muted">חוב כולל כרגע: ${money(life.remaining)}</p>
       <label>סכום (€)</label>
       <input id="f-amount" type="number" step="0.01" value="${existing?existing.amount:(life.remaining>0?life.remaining.toFixed(2):'')}">
-      <label>תאריך</label>
+      <label>תאריך שבו שולם בפועל</label>
       <input id="f-date" type="date" value="${existing?toInputDate(existDate):today}">
+      <label>עבור איזה שבוע התשלום הזה</label>
+      <div class="nav-period">
+        <button id="btn-prev-w">›</button>
+        <div class="period-label">
+          <b>${fmtDateHe(weekStart)} – ${fmtDateHe(addDays(weekStart,6))}</b><br>
+          <span class="muted">${state.periodOffset===0?'השבוע הנוכחי':state.periodOffset+' שבועות אחורה'}</span>
+        </div>
+        <button id="btn-next-w" ${state.periodOffset===0?'disabled style="opacity:.3"':''}>‹</button>
+      </div>
       ${!existing?`<div class="row" style="margin-top:10px;">
         <button class="btn btn-ghost btn-sm" id="btn-full">סמן כשולם במלואו</button>
       </div>`:''}
@@ -673,6 +705,8 @@ function openPaymentForm(empId, paymentId){
       </div>
     </div>
   `;
+  document.getElementById('btn-prev-w').onclick = ()=>{ state.periodOffset++; openPaymentForm(empId, paymentId); };
+  document.getElementById('btn-next-w').onclick = ()=>{ if(state.periodOffset>0){ state.periodOffset--; openPaymentForm(empId, paymentId); } };
   if(!existing){
     document.getElementById('btn-full').onclick = ()=>{
       document.getElementById('f-amount').value = life.remaining>0?life.remaining.toFixed(2):0;
@@ -689,7 +723,13 @@ function openPaymentForm(empId, paymentId){
     const amount = parseFloat(document.getElementById('f-amount').value);
     const dateStr = document.getElementById('f-date').value;
     if(!amount || amount<=0 || !dateStr){ toast('נא למלא סכום ותאריך'); return; }
-    const payload = { employeeId: empId, amount, date: firebase.firestore.Timestamp.fromDate(new Date(dateStr+'T12:00:00')) };
+    const targetWeek = periodStartAtOffset(state.periodOffset);
+    const payload = {
+      employeeId: empId,
+      amount,
+      date: firebase.firestore.Timestamp.fromDate(new Date(dateStr+'T12:00:00')),
+      periodKey: periodKeyOf(targetWeek)
+    };
     if(existing){
       await db.collection('payments').doc(existing.id).update(payload);
     } else {
@@ -712,7 +752,7 @@ function logRangeInfo(){
 function renderLog(){
   const range = logRangeInfo();
   const empOptions = ['<option value="all">כל העובדים</option>']
-    .concat(state.employees.map(e=>`<option value="${e.id}" ${state.logEmployeeId===e.id?'selected':''}>${e.name}</option>`));
+    .concat(state.employees.map(e=>`<option value="${e.id}" ${state.logEmployeeId===e.id?'selected':''}>${displayName(e)}</option>`));
 
   root.innerHTML = `
     <div class="card no-print">
@@ -756,7 +796,7 @@ function renderLog(){
   }
   cont.innerHTML = rows.map(s=>{
     const emp = state.employees.find(e=>e.id===s.employeeId);
-    const name = emp ? emp.name : '(עובד לא ידוע)';
+    const name = emp ? displayName(emp) : '(עובד לא ידוע)';
     let mid;
     if(s.manualTotalHours != null){
       mid = `הזנה כוללת · ${fmtHours(s.manualTotalHours)} שעות`;
@@ -824,7 +864,7 @@ function renderReports(){
         <tr><th>עובד</th><th>שעות</th><th>הגיע לו</th><th>שולם</th></tr>
         ${active.map(e=>{
           const st = statsForRange(e.id, range.start, range.end);
-          return `<tr><td>${e.name}</td><td class="mono">${fmtHours(st.hours)}</td><td class="mono">${money(st.earned)}</td><td class="mono">${money(st.paid)}</td></tr>`;
+          return `<tr><td>${displayName(e)}</td><td class="mono">${fmtHours(st.hours)}</td><td class="mono">${money(st.earned)}</td><td class="mono">${money(st.paid)}</td></tr>`;
         }).join('')}
       </table>
     </div>
@@ -837,7 +877,7 @@ function renderReports(){
     let csv = 'עובד,שעות,הגיע לו,שולם\n';
     active.forEach(e=>{
       const st = statsForRange(e.id, range.start, range.end);
-      csv += `${e.name},${fmtHours(st.hours)},${st.earned.toFixed(2)},${st.paid.toFixed(2)}\n`;
+      csv += `${displayName(e)},${fmtHours(st.hours)},${st.earned.toFixed(2)},${st.paid.toFixed(2)}\n`;
     });
     const blob = new Blob(['\uFEFF'+csv], {type:'text/csv;charset=utf-8;'});
     const a = document.createElement('a');
@@ -867,7 +907,7 @@ function renderMonthWeeksReport(){
   const active = state.employees.filter(e=>e.active!==false);
 
   const empOptions = ['<option value="all">כל העובדים (סה"כ)</option>']
-    .concat(active.map(e=>`<option value="${e.id}" ${state.reportEmployeeId===e.id?'selected':''}>${e.name}</option>`));
+    .concat(active.map(e=>`<option value="${e.id}" ${state.reportEmployeeId===e.id?'selected':''}>${displayName(e)}</option>`));
 
   // every week whose start falls before month end and whose end falls after month start
   let weeks = [];
