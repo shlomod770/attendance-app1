@@ -11,8 +11,11 @@ let state = {
   periodOffset: 0,
   tab: 'dashboard',
   detailEmployeeId: null,
-  reportMode: 'week', // week | month | year
-  reportOffset: 0
+  reportMode: 'week', // week | month | year | monthweeks
+  reportOffset: 0,
+  logEmployeeId: 'all',
+  logRange: 'week', // week | month
+  logOffset: 0
 };
 
 function toast(msg){
@@ -139,6 +142,19 @@ async function boot(){
   await loadAll();
   if(localStorage.getItem(LS_ADMIN_OK) === '1') renderApp();
   else renderGate();
+
+  // Live-ish updates: quietly reload data every 20 seconds and re-render
+  // only while looking at read-only screens (so we never wipe out a form
+  // the manager is in the middle of filling in).
+  setInterval(async ()=>{
+    if(localStorage.getItem(LS_ADMIN_OK) !== '1') return;
+    if(state.tab === 'dashboard' || state.tab === 'log'){
+      try{
+        await loadAll();
+        renderApp();
+      }catch(e){ /* ignore transient network errors */ }
+    }
+  }, 20000);
 }
 function renderGate(){
   tabsEl.innerHTML = '';
@@ -165,6 +181,7 @@ function renderGate(){
 // ---------- app shell ----------
 const TABS = [
   ['dashboard','דשבורד'],
+  ['log','כניסות ויציאות'],
   ['employees','עובדים'],
   ['reports','דוחות'],
   ['qr','QR'],
@@ -178,6 +195,7 @@ function renderApp(){
     btn.onclick = ()=>{ state.tab = btn.dataset.tab; state.detailEmployeeId=null; renderApp(); };
   });
   if(state.tab==='dashboard') renderDashboard();
+  else if(state.tab==='log') renderLog();
   else if(state.tab==='employees'){
     if(state.detailEmployeeId) renderEmployeeDetail(state.detailEmployeeId);
     else renderEmployees();
@@ -646,9 +664,97 @@ function openPaymentForm(empId, paymentId){
   };
 }
 
+// ---------- log (all check-ins / check-outs) ----------
+function logRangeInfo(){
+  if(state.logRange === 'week'){
+    const s = periodStartAtOffset(state.logOffset);
+    return { start:s, end:addDays(s,7), label: `${fmtDateHe(s)} – ${fmtDateHe(addDays(s,6))}` };
+  }
+  const s = addMonths(startOfMonth(new Date()), -state.logOffset);
+  return { start:s, end:addMonths(s,1), label: s.toLocaleDateString('he-IL',{month:'long',year:'numeric'}) };
+}
+
+function renderLog(){
+  const range = logRangeInfo();
+  const empOptions = ['<option value="all">כל העובדים</option>']
+    .concat(state.employees.map(e=>`<option value="${e.id}" ${state.logEmployeeId===e.id?'selected':''}>${e.name}</option>`));
+
+  root.innerHTML = `
+    <div class="card no-print">
+      <label>עובד</label>
+      <select id="f-log-emp">${empOptions.join('')}</select>
+      <div class="row" style="margin-top:10px;">
+        <button class="tab ${state.logRange==='week'?'active':''}" data-range="week">שבוע</button>
+        <button class="tab ${state.logRange==='month'?'active':''}" data-range="month">חודש</button>
+        <button class="btn btn-ghost btn-sm" id="btn-refresh-log" style="margin-right:auto;">רענון עכשיו</button>
+      </div>
+      <div class="nav-period" style="margin-top:10px;">
+        <button id="btn-prev">›</button>
+        <div class="period-label"><b>${range.label}</b></div>
+        <button id="btn-next" ${state.logOffset===0?'disabled style="opacity:.3"':''}>‹</button>
+      </div>
+    </div>
+    <div id="log-rows"></div>
+  `;
+  document.getElementById('f-log-emp').value = state.logEmployeeId;
+  document.getElementById('f-log-emp').onchange = (e)=>{ state.logEmployeeId = e.target.value; renderLog(); };
+  root.querySelectorAll('[data-range]').forEach(b=>b.onclick=()=>{ state.logRange=b.dataset.range; state.logOffset=0; renderLog(); });
+  document.getElementById('btn-prev').onclick = ()=>{ state.logOffset++; renderLog(); };
+  document.getElementById('btn-next').onclick = ()=>{ if(state.logOffset>0){ state.logOffset--; renderLog(); } };
+  document.getElementById('btn-refresh-log').onclick = async ()=>{ await loadAll(); renderLog(); toast('עודכן'); };
+
+  let rows = state.shifts.filter(s=>{
+    if(state.logEmployeeId !== 'all' && s.employeeId !== state.logEmployeeId) return false;
+    const d = shiftEffectiveDate(s);
+    if(!d) return false;
+    return d >= range.start && d < range.end;
+  });
+  rows.sort((a,b)=>{
+    const da = shiftEffectiveDate(a), db_ = shiftEffectiveDate(b);
+    return db_ - da;
+  });
+
+  const cont = document.getElementById('log-rows');
+  if(!rows.length){
+    cont.innerHTML = '<div class="card"><p class="muted">אין רישומים בטווח זה.</p></div>';
+    return;
+  }
+  cont.innerHTML = rows.map(s=>{
+    const emp = state.employees.find(e=>e.id===s.employeeId);
+    const name = emp ? emp.name : '(עובד לא ידוע)';
+    let mid;
+    if(s.manualTotalHours != null){
+      mid = `הזנה כוללת · ${fmtHours(s.manualTotalHours)} שעות`;
+    } else {
+      const inD = s.checkIn.toDate ? s.checkIn.toDate() : new Date(s.checkIn);
+      const outD = s.checkOut ? (s.checkOut.toDate ? s.checkOut.toDate() : new Date(s.checkOut)) : null;
+      mid = `${fmtDateHe(inD)} · כניסה ${fmtTimeHe(inD)} → יציאה ${outD?fmtTimeHe(outD):'—'}`;
+    }
+    return `<div class="card" style="padding:12px 16px;cursor:pointer;" data-goto="${s.employeeId}">
+      <div class="row between">
+        <b>${name}</b>
+        <span>
+          ${(!s.checkOut && s.manualTotalHours==null)?'<span class="tag tag-open">משמרת פתוחה</span> ':''}
+          ${s.needsReview?'<span class="tag tag-review">דורש בדיקה</span>':''}
+        </span>
+      </div>
+      <div class="muted" style="font-size:13px;margin-top:4px;">${mid}</div>
+    </div>`;
+  }).join('');
+  cont.querySelectorAll('[data-goto]').forEach(el=>el.onclick=()=>{
+    state.tab='employees'; state.detailEmployeeId = el.dataset.goto; renderApp();
+  });
+}
+
 // ---------- reports ----------
 function renderReports(){
   const active = state.employees.filter(e=>e.active!==false);
+
+  if(state.reportMode === 'monthweeks'){
+    renderMonthWeeksReport();
+    return;
+  }
+
   let range, label;
   if(state.reportMode==='week'){
     const s = periodStartAtOffset(state.reportOffset);
@@ -666,11 +772,7 @@ function renderReports(){
 
   root.innerHTML = `
     <div class="card no-print">
-      <div class="row" style="margin-bottom:10px;">
-        <button class="tab ${state.reportMode==='week'?'active':''}" data-mode="week">שבועי</button>
-        <button class="tab ${state.reportMode==='month'?'active':''}" data-mode="month">חודשי</button>
-        <button class="tab ${state.reportMode==='year'?'active':''}" data-mode="year">שנתי</button>
-      </div>
+      ${reportModeTabsHtml()}
       <div class="nav-period">
         <button id="btn-prev">›</button>
         <div class="period-label"><b>${label}</b></div>
@@ -692,7 +794,7 @@ function renderReports(){
       </table>
     </div>
   `;
-  root.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{ state.reportMode=b.dataset.mode; state.reportOffset=0; renderReports(); });
+  bindReportModeTabs();
   document.getElementById('btn-prev').onclick = ()=>{ state.reportOffset++; renderReports(); };
   document.getElementById('btn-next').onclick = ()=>{ if(state.reportOffset>0){ state.reportOffset--; renderReports(); } };
   document.getElementById('btn-print').onclick = ()=>window.print();
@@ -706,6 +808,100 @@ function renderReports(){
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = `דוח-שכר-${state.reportMode}-${dateKey(range.start)}.csv`;
+    a.click();
+  };
+}
+
+function reportModeTabsHtml(){
+  return `<div class="row" style="margin-bottom:10px;flex-wrap:wrap;">
+    <button class="tab ${state.reportMode==='week'?'active':''}" data-mode="week">שבועי</button>
+    <button class="tab ${state.reportMode==='month'?'active':''}" data-mode="month">חודשי</button>
+    <button class="tab ${state.reportMode==='monthweeks'?'active':''}" data-mode="monthweeks">חודשי לפי שבועות</button>
+    <button class="tab ${state.reportMode==='year'?'active':''}" data-mode="year">שנתי</button>
+  </div>`;
+}
+function bindReportModeTabs(){
+  root.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{ state.reportMode=b.dataset.mode; state.reportOffset=0; renderReports(); });
+}
+
+// A month, broken down week by week: each week's date range, hours, earned, paid, remaining.
+function renderMonthWeeksReport(){
+  const monthStart = addMonths(startOfMonth(new Date()), -state.reportOffset);
+  const monthEnd = addMonths(monthStart, 1);
+  const monthLabel = monthStart.toLocaleDateString('he-IL',{month:'long',year:'numeric'});
+  const active = state.employees.filter(e=>e.active!==false);
+
+  const empOptions = ['<option value="all">כל העובדים (סה"כ)</option>']
+    .concat(active.map(e=>`<option value="${e.id}" ${state.reportEmployeeId===e.id?'selected':''}>${e.name}</option>`));
+
+  // every week whose start falls before month end and whose end falls after month start
+  let weeks = [];
+  let w = periodStartFor(monthStart, state.config.periodStartDay);
+  while(w < monthEnd){
+    if(addDays(w,7) > monthStart) weeks.push(w);
+    w = addDays(w,7);
+  }
+
+  root.innerHTML = `
+    <div class="card no-print">
+      ${reportModeTabsHtml()}
+      <label>עובד</label>
+      <select id="f-report-emp">${empOptions.join('')}</select>
+      <div class="nav-period" style="margin-top:10px;">
+        <button id="btn-prev">›</button>
+        <div class="period-label"><b>${monthLabel}</b></div>
+        <button id="btn-next" ${state.reportOffset===0?'disabled style="opacity:.3"':''}>‹</button>
+      </div>
+      <div class="row" style="margin-top:12px;">
+        <button class="btn btn-ghost btn-sm" id="btn-print">הדפסה</button>
+        <button class="btn btn-ghost btn-sm" id="btn-csv">ייצוא לאקסל (CSV)</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>${monthLabel} — לפי שבועות</h2>
+      <div id="weeks-cont"></div>
+    </div>
+  `;
+  bindReportModeTabs();
+  document.getElementById('f-report-emp').value = state.reportEmployeeId || 'all';
+  document.getElementById('f-report-emp').onchange = (e)=>{ state.reportEmployeeId = e.target.value; renderMonthWeeksReport(); };
+  document.getElementById('btn-prev').onclick = ()=>{ state.reportOffset++; renderMonthWeeksReport(); };
+  document.getElementById('btn-next').onclick = ()=>{ if(state.reportOffset>0){ state.reportOffset--; renderMonthWeeksReport(); } };
+
+  const empId = state.reportEmployeeId || 'all';
+  function statsFor(start,end){
+    if(empId === 'all'){
+      let hours=0, earned=0, paid=0;
+      active.forEach(e=>{ const s = statsForRange(e.id, start, end); hours+=s.hours; earned+=s.earned; paid+=s.paid; });
+      return {hours,earned,paid};
+    }
+    return statsForRange(empId, start, end);
+  }
+
+  const cont = document.getElementById('weeks-cont');
+  cont.innerHTML = weeks.map(ws=>{
+    const we = addDays(ws,6);
+    const st = statsFor(ws, addDays(ws,7));
+    return `<div class="card" style="margin:10px 0;">
+      <div class="row between"><b>${fmtDateHe(ws)} – ${fmtDateHe(we)}</b><span class="mono">${fmtHours(st.hours)} ש'</span></div>
+      <div class="row between muted"><span>הגיע</span><span class="mono">${money(st.earned)}</span></div>
+      <div class="row between muted"><span>שולם</span><span class="mono">${money(st.paid)}</span></div>
+      <div class="row between"><b>נותר</b><b class="mono">${money(st.earned-st.paid)}</b></div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('btn-print').onclick = ()=>window.print();
+  document.getElementById('btn-csv').onclick = ()=>{
+    let csv = 'שבוע (התחלה),שבוע (סוף),שעות,הגיע,שולם,נותר\n';
+    weeks.forEach(ws=>{
+      const we = addDays(ws,6);
+      const st = statsFor(ws, addDays(ws,7));
+      csv += `${fmtDateHe(ws)},${fmtDateHe(we)},${fmtHours(st.hours)},${st.earned.toFixed(2)},${st.paid.toFixed(2)},${(st.earned-st.paid).toFixed(2)}\n`;
+    });
+    const blob = new Blob(['\uFEFF'+csv], {type:'text/csv;charset=utf-8;'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `דוח-שבועי-${dateKey(monthStart)}.csv`;
     a.click();
   };
 }
