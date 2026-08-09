@@ -1,0 +1,63 @@
+@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Mono:wght@500;600&family=Heebo:wght@400;500;700&display=swap');
+
+:root{
+  --ink:#12213A;
+  --ink-2:#1B2E4D;
+  --paper:#F6F3EC;
+  --paper-2:#EDE8DB;
+  --brass:#D9A441;
+  --brass-dark:#B8842A;
+  --good:#3E7C59;
+  --bad:#B4432E;
+  --line:#D8D0BC;
+  --radius:14px;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;background:var(--paper);color:var(--ink);font-family:'Heebo',system-ui,sans-serif;-webkit-tap-highlight-color:transparent;}
+body{min-height:100vh;}
+h1,h2,h3{font-family:'Bebas Neue',system-ui,sans-serif;letter-spacing:.03em;color:var(--ink);margin:0 0 .2em 0;}
+.mono{font-family:'IBM Plex Mono',monospace;}
+.screen{max-width:520px;margin:0 auto;padding:20px 16px 90px;}
+.card{background:#fff;border:1px solid var(--line);border-radius:var(--radius);padding:18px;margin-bottom:14px;box-shadow:0 1px 2px rgba(18,33,58,.05);}
+.btn{display:block;width:100%;text-align:center;padding:16px;border-radius:var(--radius);border:none;font-size:17px;font-weight:600;cursor:pointer;font-family:'Heebo',system-ui,sans-serif;}
+.btn-primary{background:var(--ink);color:var(--paper);}
+.btn-primary:active{background:var(--ink-2);}
+.btn-brass{background:var(--brass);color:var(--ink);}
+.btn-brass:active{background:var(--brass-dark);}
+.btn-ghost{background:transparent;color:var(--ink);border:1px solid var(--line);}
+.btn-danger{background:var(--bad);color:#fff;}
+.btn-sm{padding:9px 12px;font-size:14px;width:auto;border-radius:10px;}
+input,select,textarea{width:100%;padding:13px;border:1px solid var(--line);border-radius:10px;font-size:16px;font-family:inherit;background:#fff;color:var(--ink);}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--brass);border-color:var(--brass);}
+label{display:block;font-size:13px;color:#6b6250;margin:10px 0 5px;font-weight:600;}
+.center{text-align:center;}
+.muted{color:#7c7562;font-size:14px;}
+.big-num{font-family:'IBM Plex Mono',monospace;font-size:34px;font-weight:600;}
+.row{display:flex;gap:10px;align-items:center;}
+.row.between{justify-content:space-between;}
+.tag{display:inline-block;font-size:12px;font-weight:700;padding:3px 9px;border-radius:100px;}
+.tag-open{background:#E4F1E9;color:var(--good);}
+.tag-review{background:#F9E4DE;color:var(--bad);}
+.tag-off{background:var(--paper-2);color:#948b74;}
+.divider{height:1px;background:var(--line);margin:14px 0;}
+a{color:var(--ink);}
+.stamp{width:100%;padding:36px 16px;border-radius:20px;background:var(--ink);color:var(--paper);text-align:center;cursor:pointer;border:none;}
+.stamp .lbl{font-family:'Bebas Neue';font-size:30px;letter-spacing:.06em;}
+.clock-digits{font-family:'IBM Plex Mono',monospace;font-size:15px;color:#a9b6cc;margin-top:8px;}
+.nav-period{display:flex;align-items:center;justify-content:space-between;gap:10px;}
+.nav-period button{background:var(--paper-2);border:none;border-radius:10px;width:40px;height:40px;font-size:18px;cursor:pointer;}
+.period-label{text-align:center;flex:1;}
+.topbar{position:sticky;top:0;background:var(--paper);z-index:5;padding:14px 16px 8px;border-bottom:1px solid var(--line);}
+.tabs{display:flex;gap:6px;overflow-x:auto;padding:10px 16px 0;position:sticky;top:56px;background:var(--paper);z-index:4;}
+.tab{padding:8px 14px;border-radius:100px;background:var(--paper-2);font-size:13px;font-weight:700;white-space:nowrap;cursor:pointer;border:none;color:#5c563f;}
+.tab.active{background:var(--ink);color:var(--paper);}
+table{width:100%;border-collapse:collapse;font-size:14px;}
+th,td{padding:8px 6px;border-bottom:1px solid var(--line);text-align:right;}
+th{color:#6b6250;font-weight:700;font-size:12px;}
+.hidden{display:none !important;}
+#qr-reader{border-radius:var(--radius);overflow:hidden;}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--paper);padding:12px 20px;border-radius:100px;font-size:14px;z-index:50;box-shadow:0 4px 14px rgba(0,0,0,.25);}
+@media print{
+  .no-print{display:none !important;}
+  body{background:#fff;}
+}
