@@ -19,6 +19,19 @@ function toast(msg){
   setTimeout(()=>t.remove(), 3000);
 }
 
+// Best-effort location capture. Never blocks the clock-in/out flow —
+// if the person denies permission or it times out, we just proceed without it.
+function getLocation(){
+  return new Promise((resolve)=>{
+    if(!navigator.geolocation){ resolve(null); return; }
+    navigator.geolocation.getCurrentPosition(
+      pos => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      ()  => resolve(null),
+      { timeout: 8000, maximumAge: 60000 }
+    );
+  });
+}
+
 function fmtTime(d){
   return d.toLocaleTimeString('bg-BG', {hour:'2-digit', minute:'2-digit'});
 }
@@ -107,6 +120,7 @@ function renderScan(){
     </div>
   `;
   renderStageButton();
+  getLocation(); // trigger the permission prompt early, in the background
   document.getElementById('btn-logout').onclick = (e)=>{
     e.preventDefault();
     localStorage.removeItem(LS_SESSION);
@@ -120,10 +134,12 @@ function renderScan(){
   document.getElementById('btn-send-note').onclick = async ()=>{
     const txt = document.getElementById('f-note').value.trim();
     if(!txt) return;
+    const loc = await getLocation();
     await db.collection('notes').add({
       employeeId: currentEmployee.id,
       employeeName: currentEmployee.name || currentEmployee.username,
       text: txt,
+      location: loc,
       createdAt: firebase.firestore.FieldValue.serverTimestamp()
     });
     document.getElementById('f-note').value = '';
@@ -197,6 +213,8 @@ async function onScanSuccess(decodedText){
 async function processScan(){
   try{
     const now = new Date();
+    const loc = await getLocation();
+
     // Fetch all shifts for this employee (no composite index required),
     // then find the open one (if any) here in the browser.
     const allSnap = await db.collection('shifts')
@@ -211,6 +229,7 @@ async function processScan(){
       await db.collection('shifts').add({
         employeeId: currentEmployee.id,
         checkIn: firebase.firestore.Timestamp.fromDate(now),
+        checkInLoc: loc,
         checkOut: null,
         needsReview: false,
         note: ''
@@ -229,6 +248,7 @@ async function processScan(){
       await db.collection('shifts').add({
         employeeId: currentEmployee.id,
         checkIn: firebase.firestore.Timestamp.fromDate(now),
+        checkInLoc: loc,
         checkOut: null,
         needsReview: false,
         note: ''
@@ -238,7 +258,8 @@ async function processScan(){
     }
 
     await db.collection('shifts').doc(openDoc.id).update({
-      checkOut: firebase.firestore.Timestamp.fromDate(now)
+      checkOut: firebase.firestore.Timestamp.fromDate(now),
+      checkOutLoc: loc
     });
     const durationH = hoursSince;
     const h = Math.floor(durationH);
