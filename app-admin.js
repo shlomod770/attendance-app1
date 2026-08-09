@@ -72,9 +72,9 @@ async function loadAll(){
   state.payments = paySnap.docs.map(d=>({id:d.id, ...d.data()}));
   state.notes = notesSnap.docs.map(d=>({id:d.id, ...d.data()}));
   if(cfgDoc.exists){
-    state.config = { qrToken:'', adminCode:'1234', periodStartDay:5, ...cfgDoc.data() };
+    state.config = { qrToken:'', adminCode:'1234', periodStartDay:5, businessRadius:150, ...cfgDoc.data() };
   } else {
-    state.config = { qrToken: genToken(), adminCode:'1234', periodStartDay:5 };
+    state.config = { qrToken: genToken(), adminCode:'1234', periodStartDay:5, businessRadius:150 };
     await db.collection('config').doc('main').set(state.config);
   }
 }
@@ -86,6 +86,52 @@ function displayName(e){
 function locLink(loc, label){
   if(!loc || loc.lat==null) return '';
   return ` <a href="https://www.google.com/maps?q=${loc.lat},${loc.lng}" target="_blank" style="font-size:12px;">📍${label||'מיקום'}</a>`;
+}
+
+// distance in meters between two lat/lng points
+function distMeters(a, b){
+  if(!a || !b || a.lat==null || b.lat==null) return null;
+  const R = 6371000;
+  const toRad = x => x*Math.PI/180;
+  const dLat = toRad(b.lat-a.lat), dLng = toRad(b.lng-a.lng);
+  const h = Math.sin(dLat/2)**2 + Math.cos(toRad(a.lat))*Math.cos(toRad(b.lat))*Math.sin(dLng/2)**2;
+  return R * 2*Math.atan2(Math.sqrt(h), Math.sqrt(1-h));
+}
+
+const LONG_SHIFT_HOURS = 14;
+
+// Returns a list of human-readable reasons this shift looks unusual, or [] if it's fine.
+function shiftExceptionReasons(s){
+  if(s.exceptionDismissed) return [];
+  const reasons = [];
+  if(s.manualTotalHours != null) return reasons; // manual entries have no location/time to flag
+
+  if(s.needsReview) reasons.push('משמרת ישנה שלא נסגרה (מעל 17 שעות) — נפתחה משמרת חדשה');
+
+  if(s.checkIn && !s.checkOut){
+    const inD = s.checkIn.toDate ? s.checkIn.toDate() : new Date(s.checkIn);
+    const hrs = (new Date() - inD) / 3600000;
+    if(hrs > LONG_SHIFT_HOURS && !s.needsReview) reasons.push(`משמרת פתוחה כבר ${fmtHours(hrs)} שעות`);
+  }
+  if(s.checkIn && s.checkOut){
+    const hrs = shiftDurationHours(s);
+    if(hrs > LONG_SHIFT_HOURS) reasons.push(`משמרת ארוכה מהרגיל — ${fmtHours(hrs)} שעות`);
+  }
+  if(!s.checkIn && s.checkOut) reasons.push('קיימת שעת יציאה בלי שעת כניסה');
+
+  const biz = state.config.businessLocation;
+  const radius = state.config.businessRadius || 150;
+  if(biz && biz.lat != null){
+    if(s.checkInLoc){
+      const d = distMeters(biz, s.checkInLoc);
+      if(d != null && d > radius) reasons.push(`מיקום הכניסה רחוק מהעסק (כ-${Math.round(d)} מ')`);
+    }
+    if(s.checkOutLoc){
+      const d = distMeters(biz, s.checkOutLoc);
+      if(d != null && d > radius) reasons.push(`מיקום היציאה רחוק מהעסק (כ-${Math.round(d)} מ')`);
+    }
+  }
+  return reasons;
 }
 
 // ---------- shift helpers ----------
@@ -169,7 +215,7 @@ async function boot(){
   // the manager is in the middle of filling in).
   setInterval(async ()=>{
     if(localStorage.getItem(LS_ADMIN_OK) !== '1') return;
-    if(state.tab === 'dashboard' || state.tab === 'log' || state.tab === 'payments'){
+    if(state.tab === 'dashboard' || state.tab === 'log' || state.tab === 'payments' || state.tab === 'exceptions'){
       try{
         await loadAll();
         renderApp();
@@ -203,6 +249,7 @@ function renderGate(){
 const TABS = [
   ['dashboard','דשבורד'],
   ['log','כניסות ויציאות'],
+  ['exceptions','חריגים'],
   ['employees','עובדים'],
   ['payments','תשלומים'],
   ['reports','דוחות'],
@@ -222,6 +269,7 @@ function renderApp(){
     if(state.detailEmployeeId) renderEmployeeDetail(state.detailEmployeeId);
     else renderEmployees();
   }
+  else if(state.tab==='exceptions') renderExceptions();
   else if(state.tab==='payments') renderPayments();
   else if(state.tab==='reports') renderReports();
   else if(state.tab==='qr') renderQr();
@@ -242,6 +290,7 @@ function renderDashboard(){
     totalOwed += employeeLifetimeStats(e.id).remaining;
   });
   const alerts = active.filter(e=>hasOpenShift(e.id) || hasReviewShift(e.id));
+  const excCount = state.shifts.filter(s=>shiftExceptionReasons(s).length).length;
 
   root.innerHTML = `
     <div class="card">
@@ -261,6 +310,12 @@ function renderDashboard(){
     <div class="card">
       <div class="row between"><span>עובדים פעילים</span><b class="mono">${active.length}</b></div>
     </div>
+    <div class="card">
+      <div class="row between" style="cursor:pointer;" id="goto-exceptions">
+        <span>חריגים לבדיקה</span>
+        <b class="mono">${excCount}</b>
+      </div>
+    </div>
     ${alerts.length ? `<div class="card">
       <h3>דורש תשומת לב</h3>
       ${alerts.map(e=>`
@@ -273,6 +328,7 @@ function renderDashboard(){
         </div>`).join('')}
     </div>` : ''}
   `;
+  document.getElementById('goto-exceptions').onclick = ()=>{ state.tab='exceptions'; renderApp(); };
   root.querySelectorAll('[data-goto]').forEach(el=>el.onclick=()=>{
     state.tab='employees'; state.detailEmployeeId = el.dataset.goto; renderApp();
   });
@@ -518,7 +574,8 @@ function shiftRowHtml(s){
   </div>`;
 }
 
-function openEditShift(shiftId, empId){
+function openEditShift(shiftId, empId, returnTo){
+  const goBack = returnTo || (()=>renderEmployeeDetail(empId));
   const s = state.shifts.find(x=>x.id===shiftId);
   if(!s) return;
   if(s.manualTotalHours != null){
@@ -538,19 +595,19 @@ function openEditShift(shiftId, empId){
         </div>
       </div>
     `;
-    document.getElementById('btn-cancel').onclick = ()=>renderEmployeeDetail(empId);
+    document.getElementById('btn-cancel').onclick = goBack;
     document.getElementById('btn-save').onclick = async ()=>{
       const h = parseFloat(document.getElementById('f-h').value) || 0;
       const m = parseFloat(document.getElementById('f-m').value) || 0;
       const hours = h + (m/60);
       if(hours<=0){ toast('נא להזין שעות ו/או דקות'); return; }
       await db.collection('shifts').doc(shiftId).update({manualTotalHours: hours});
-      await loadAll(); renderEmployeeDetail(empId); toast('נשמר');
+      await loadAll(); goBack(); toast('נשמר');
     };
     document.getElementById('btn-del').onclick = async ()=>{
       if(!confirm('למחוק רישום זה?')) return;
       await db.collection('shifts').doc(shiftId).delete();
-      await loadAll(); renderEmployeeDetail(empId);
+      await loadAll(); goBack();
     };
     return;
   }
@@ -577,15 +634,15 @@ function openEditShift(shiftId, empId){
       </div>
     </div>
   `;
-  document.getElementById('btn-cancel').onclick = ()=>renderEmployeeDetail(empId);
+  document.getElementById('btn-cancel').onclick = goBack;
   document.getElementById('btn-clear-out').onclick = async ()=>{
     await db.collection('shifts').doc(shiftId).update({checkOut:null, needsReview:false});
-    await loadAll(); renderEmployeeDetail(empId); toast('שעת היציאה נוקתה — המשמרת פתוחה כעת');
+    await loadAll(); goBack(); toast('שעת היציאה נוקתה — המשמרת פתוחה כעת');
   };
   document.getElementById('btn-del').onclick = async ()=>{
     if(!confirm('למחוק את המשמרת הזו לגמרי?')) return;
     await db.collection('shifts').doc(shiftId).delete();
-    await loadAll(); renderEmployeeDetail(empId);
+    await loadAll(); goBack();
   };
   document.getElementById('btn-save').onclick = async ()=>{
     const dateStr = document.getElementById('f-date').value;
@@ -594,7 +651,7 @@ function openEditShift(shiftId, empId){
     const outDateStr = document.getElementById('f-outdate').value;
     if(!dateStr || !inTime){ toast('נא למלא תאריך ושעת כניסה'); return; }
     const newIn = new Date(`${dateStr}T${inTime}:00`);
-    let update = { checkIn: firebase.firestore.Timestamp.fromDate(newIn), needsReview:false };
+    let update = { checkIn: firebase.firestore.Timestamp.fromDate(newIn), needsReview:false, exceptionDismissed:false };
     if(outTime){
       const newOut = new Date(`${outDateStr||dateStr}T${outTime}:00`);
       update.checkOut = firebase.firestore.Timestamp.fromDate(newOut);
@@ -602,11 +659,14 @@ function openEditShift(shiftId, empId){
       update.checkOut = null;
     }
     await db.collection('shifts').doc(shiftId).update(update);
-    await loadAll(); renderEmployeeDetail(empId); toast('נשמר');
+    await loadAll(); goBack(); toast('נשמר');
   };
 }
 
-function toInputDate(d){ return d.toISOString().slice(0,10); }
+function toInputDate(d){
+  const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,'0'), day = String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
 function toInputTime(d){ return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }
 
 function openQuickEntry(empId){
@@ -859,6 +919,75 @@ function renderLog(){
   });
 }
 
+// ---------- exceptions ----------
+function renderExceptions(){
+  const items = state.shifts
+    .map(s=>({ s, reasons: shiftExceptionReasons(s) }))
+    .filter(x=>x.reasons.length);
+
+  const biz = state.config.businessLocation;
+
+  root.innerHTML = `
+    <div class="card no-print">
+      <h2>חריגים לבדיקה</h2>
+      <p class="muted">משמרות שכדאי להעיף בהן מבט — מיקום רחוק מהעסק, משמרת ארוכה מהרגיל, או רישום חסר.</p>
+      ${!biz ? `<p class="muted" style="color:var(--bad);">לא הוגדר מיקום עסק, כך שבדיקת המיקום מושבתת. אפשר להגדיר בטאב "הגדרות".</p>` : ''}
+      <button class="btn btn-ghost btn-sm" id="btn-refresh">רענון עכשיו</button>
+    </div>
+    <div id="exc-list"></div>
+  `;
+  document.getElementById('btn-refresh').onclick = async ()=>{ await loadAll(); renderExceptions(); toast('עודכן'); };
+
+  const cont = document.getElementById('exc-list');
+  if(!items.length){
+    cont.innerHTML = '<div class="card"><p class="muted">אין כרגע חריגים לבדיקה 🎉</p></div>';
+    return;
+  }
+
+  items.sort((a,b)=>{
+    const da = shiftEffectiveDate(a.s) || new Date(0);
+    const db_ = shiftEffectiveDate(b.s) || new Date(0);
+    return db_ - da;
+  });
+
+  cont.innerHTML = items.map(({s,reasons})=>{
+    const emp = state.employees.find(e=>e.id===s.employeeId);
+    const inD = s.checkIn ? (s.checkIn.toDate?s.checkIn.toDate():new Date(s.checkIn)) : null;
+    const outD = s.checkOut ? (s.checkOut.toDate?s.checkOut.toDate():new Date(s.checkOut)) : null;
+    return `<div class="card">
+      <div class="row between">
+        <b>${emp?displayName(emp):'(עובד לא ידוע)'}</b>
+        <span class="muted" style="font-size:12px;">${inD?fmtDateHe(inD):''}</span>
+      </div>
+      <div class="muted" style="font-size:13px;margin:4px 0;">
+        ${inD?`כניסה: ${fmtTimeHe(inD)}${locLink(s.checkInLoc,'מיקום כניסה')}`:''}
+        ${outD?`<br>יציאה: ${fmtTimeHe(outD)}${locLink(s.checkOutLoc,'מיקום יציאה')}`:''}
+      </div>
+      <div>
+        ${reasons.map(r=>`<span class="tag tag-review" style="display:inline-block;margin:2px 4px 2px 0;">${r}</span>`).join('')}
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <button class="btn btn-brass btn-sm" data-approve="${s.id}">אישור — תקין</button>
+        <button class="btn btn-ghost btn-sm" data-edit="${s.id}" data-emp="${s.employeeId}">עריכה</button>
+        <button class="btn btn-danger btn-sm" data-del="${s.id}">מחיקה</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  cont.querySelectorAll('[data-approve]').forEach(b=>b.onclick=async()=>{
+    await db.collection('shifts').doc(b.dataset.approve).update({ exceptionDismissed:true, needsReview:false });
+    await loadAll(); renderExceptions(); toast('אושר');
+  });
+  cont.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>{
+    openEditShift(b.dataset.edit, b.dataset.emp, renderExceptions);
+  });
+  cont.querySelectorAll('[data-del]').forEach(b=>b.onclick=async()=>{
+    if(!confirm('למחוק את המשמרת הזו?')) return;
+    await db.collection('shifts').doc(b.dataset.del).delete();
+    await loadAll(); renderExceptions();
+  });
+}
+
 // ---------- global payments log ----------
 function paymentPeriodLabel(p){
   if(!p.periodKey) return '—';
@@ -1104,6 +1233,7 @@ function renderQr(){
 
 // ---------- settings ----------
 function renderSettings(){
+  const biz = state.config.businessLocation;
   root.innerHTML = `
     <div class="card">
       <h2>שינוי קוד גישה</h2>
@@ -1117,6 +1247,17 @@ function renderSettings(){
         ${['ראשון','שני','שלישי','רביעי','חמישי','שישי','שבת'].map((d,i)=>`<option value="${i}" ${i===state.config.periodStartDay?'selected':''}>${d}</option>`).join('')}
       </select>
       <button class="btn btn-primary btn-sm" style="margin-top:10px;" id="btn-save-day">שמירה</button>
+    </div>
+    <div class="card">
+      <h2>מיקום העסק (לבדיקת חריגים)</h2>
+      <p class="muted">אם מגדירים כאן את מיקום העסק, המערכת תסמן אוטומטית בטאב "חריגים" כל כניסה/יציאה שנסרקה רחוק מדי משם.</p>
+      <p class="muted">${biz ? `מיקום נוכחי: ${biz.lat.toFixed(5)}, ${biz.lng.toFixed(5)}` : 'עדיין לא הוגדר מיקום.'}</p>
+      <label>רדיוס מותר (במטרים)</label>
+      <input id="f-radius" type="number" value="${state.config.businessRadius || 150}">
+      <div class="row" style="margin-top:10px;">
+        <button class="btn btn-brass btn-sm" id="btn-use-here">השתמש במיקום הנוכחי שלי כעת</button>
+      </div>
+      <button class="btn btn-primary btn-sm" style="margin-top:10px;" id="btn-save-biz">שמירה</button>
     </div>
     <div class="card">
       <h2>גיבוי נתונים</h2>
@@ -1140,8 +1281,26 @@ function renderSettings(){
     state.config.periodStartDay = v;
     toast('נשמר');
   };
+  let pendingLoc = biz || null;
+  document.getElementById('btn-use-here').onclick = ()=>{
+    if(!navigator.geolocation){ toast('הדפדפן לא תומך במיקום'); return; }
+    toast('מאתר מיקום...');
+    navigator.geolocation.getCurrentPosition(
+      pos=>{ pendingLoc = { lat: pos.coords.latitude, lng: pos.coords.longitude }; toast('המיקום נקלט — לחצו שמירה כדי לאשר'); },
+      ()=>{ toast('לא ניתן היה לאתר מיקום'); }
+    );
+  };
+  document.getElementById('btn-save-biz').onclick = async ()=>{
+    const radius = parseInt(document.getElementById('f-radius').value,10) || 150;
+    if(!pendingLoc){ toast('יש קודם ללחוץ על "השתמש במיקום הנוכחי שלי"'); return; }
+    await db.collection('config').doc('main').update({businessLocation: pendingLoc, businessRadius: radius});
+    state.config.businessLocation = pendingLoc;
+    state.config.businessRadius = radius;
+    renderSettings();
+    toast('מיקום העסק נשמר');
+  };
   document.getElementById('btn-backup').onclick = ()=>{
-    const data = { employees: state.employees, shifts: state.shifts, payments: state.payments, config: state.config, exportedAt: new Date().toISOString() };
+    const data = { employees: state.employees, shifts: state.shifts, payments: state.payments, notes: state.notes, config: state.config, exportedAt: new Date().toISOString() };
     const blob = new Blob([JSON.stringify(data,null,2)], {type:'application/json'});
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
