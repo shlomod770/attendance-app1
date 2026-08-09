@@ -176,10 +176,17 @@ function stopScanner(){
 async function onScanSuccess(decodedText){
   if(!qrScanner) return;
   await qrScanner.pause(true);
-  const cfgDoc = await db.collection('config').doc('main').get();
-  const validToken = cfgDoc.exists ? cfgDoc.data().qrToken : null;
-  if(!validToken || decodedText !== validToken){
-    toast('Невалиден QR код');
+  try{
+    const cfgDoc = await db.collection('config').doc('main').get();
+    const validToken = cfgDoc.exists ? cfgDoc.data().qrToken : null;
+    if(!validToken || decodedText !== validToken){
+      toast('Невалиден QR код');
+      qrScanner.resume();
+      return;
+    }
+  }catch(err){
+    console.error(err);
+    toast('Проблем с връзката. Опитайте отново.');
     qrScanner.resume();
     return;
   }
@@ -188,56 +195,65 @@ async function onScanSuccess(decodedText){
 }
 
 async function processScan(){
-  const now = new Date();
-  const openSnap = await db.collection('shifts')
-    .where('employeeId','==', currentEmployee.id)
-    .where('checkOut','==', null)
-    .orderBy('checkIn','desc')
-    .limit(1)
-    .get();
+  try{
+    const now = new Date();
+    // Fetch all shifts for this employee (no composite index required),
+    // then find the open one (if any) here in the browser.
+    const allSnap = await db.collection('shifts')
+      .where('employeeId','==', currentEmployee.id)
+      .get();
 
-  if(openSnap.empty){
-    await db.collection('shifts').add({
-      employeeId: currentEmployee.id,
-      checkIn: firebase.firestore.Timestamp.fromDate(now),
-      checkOut: null,
-      needsReview: false,
-      note: ''
+    const openDocs = allSnap.docs
+      .filter(d => !d.data().checkOut && d.data().checkIn && d.data().manualTotalHours == null)
+      .sort((a,b) => b.data().checkIn.toMillis() - a.data().checkIn.toMillis());
+
+    if(openDocs.length === 0){
+      await db.collection('shifts').add({
+        employeeId: currentEmployee.id,
+        checkIn: firebase.firestore.Timestamp.fromDate(now),
+        checkOut: null,
+        needsReview: false,
+        note: ''
+      });
+      showResult(true, `Час: ${fmtTime(now)}`);
+      return;
+    }
+
+    const openDoc = openDocs[0];
+    const openData = openDoc.data();
+    const checkIn = openData.checkIn.toDate();
+    const hoursSince = (now - checkIn) / 3600000;
+
+    if(hoursSince > 17){
+      await db.collection('shifts').doc(openDoc.id).update({ needsReview: true });
+      await db.collection('shifts').add({
+        employeeId: currentEmployee.id,
+        checkIn: firebase.firestore.Timestamp.fromDate(now),
+        checkOut: null,
+        needsReview: false,
+        note: ''
+      });
+      showResult(true, `Час: ${fmtTime(now)}`);
+      return;
+    }
+
+    await db.collection('shifts').doc(openDoc.id).update({
+      checkOut: firebase.firestore.Timestamp.fromDate(now)
     });
-    showResult(true, `Час: ${fmtTime(now)}`);
-    return;
+    const durationH = hoursSince;
+    const h = Math.floor(durationH);
+    const m = Math.round((durationH - h) * 60);
+    const dayNote = sameDay(checkIn, now) ? '' : ` (${fmtDate(now)})`;
+    showResult(false, `
+      Вход: ${fmtTime(checkIn)}<br>
+      Изход: ${fmtTime(now)}${dayNote}<br>
+      <b>Общо часове: ${h} ч ${m} мин</b>
+    `);
+  }catch(err){
+    console.error(err);
+    toast('Възникна грешка. Опитайте отново.');
+    renderStageButton();
   }
-
-  const openDoc = openSnap.docs[0];
-  const openData = openDoc.data();
-  const checkIn = openData.checkIn.toDate();
-  const hoursSince = (now - checkIn) / 3600000;
-
-  if(hoursSince > 17){
-    await db.collection('shifts').doc(openDoc.id).update({ needsReview: true });
-    await db.collection('shifts').add({
-      employeeId: currentEmployee.id,
-      checkIn: firebase.firestore.Timestamp.fromDate(now),
-      checkOut: null,
-      needsReview: false,
-      note: ''
-    });
-    showResult(true, `Час: ${fmtTime(now)}`);
-    return;
-  }
-
-  await db.collection('shifts').doc(openDoc.id).update({
-    checkOut: firebase.firestore.Timestamp.fromDate(now)
-  });
-  const durationH = hoursSince;
-  const h = Math.floor(durationH);
-  const m = Math.round((durationH - h) * 60);
-  const dayNote = sameDay(checkIn, now) ? '' : ` (${fmtDate(now)})`;
-  showResult(false, `
-    Вход: ${fmtTime(checkIn)}<br>
-    Изход: ${fmtTime(now)}${dayNote}<br>
-    <b>Общо часове: ${h} ч ${m} мин</b>
-  `);
 }
 
 function showResult(isCheckIn, bodyHtml){
