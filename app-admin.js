@@ -30,7 +30,13 @@ function toast(msg){
 function addDays(d, n){ const r = new Date(d); r.setDate(r.getDate()+n); return r; }
 function addMonths(d, n){ const r = new Date(d); r.setMonth(r.getMonth()+n); return r; }
 function startOfDay(d){ const r = new Date(d); r.setHours(0,0,0,0); return r; }
-function dateKey(d){ return startOfDay(d).toISOString().slice(0,10); }
+function dateKey(d){
+  const x = startOfDay(d);
+  const y = x.getFullYear();
+  const m = String(x.getMonth()+1).padStart(2,'0');
+  const day = String(x.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
 function fmtDateHe(d){ return d.toLocaleDateString('he-IL', {day:'2-digit', month:'2-digit', year:'numeric'}); }
 function fmtTimeHe(d){ return d.toLocaleTimeString('he-IL', {hour:'2-digit', minute:'2-digit'}); }
 function fmtHours(h){
@@ -374,7 +380,7 @@ function renderEmployeeDetail(empId){
         <button id="btn-prev-w">›</button>
         <div class="period-label">
           <b>${fmtDateHe(w.start)} – ${fmtDateHe(addDays(w.start,6))}</b><br>
-          <span class="muted">שעות השבוע: ${fmtHours(w.hours)} · ${money(w.earned)}</span>
+          <span class="muted">${state.periodOffset===0?'השבוע הנוכחי':state.periodOffset+' שבועות אחורה'} · שעות: ${fmtHours(w.hours)} · ${money(w.earned)}</span>
         </div>
         <button id="btn-next-w" ${state.periodOffset===0?'disabled style="opacity:.3"':''}>‹</button>
       </div>
@@ -406,7 +412,7 @@ function renderEmployeeDetail(empId){
   document.getElementById('btn-add-payment').onclick = ()=>openPaymentForm(emp.id, null);
   document.getElementById('btn-prev-w').onclick = ()=>{ state.periodOffset++; renderEmployeeDetail(empId); };
   document.getElementById('btn-next-w').onclick = ()=>{ if(state.periodOffset>0){ state.periodOffset--; renderEmployeeDetail(empId); } };
-  document.getElementById('btn-quick').onclick = ()=>openQuickEntry(empId, w.start);
+  document.getElementById('btn-quick').onclick = ()=>openQuickEntry(empId);
   document.getElementById('btn-detail').onclick = ()=>openDetailEntry(empId);
 
   const wsCont = document.getElementById('week-shifts');
@@ -558,11 +564,20 @@ function openEditShift(shiftId, empId){
 function toInputDate(d){ return d.toISOString().slice(0,10); }
 function toInputTime(d){ return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }
 
-function openQuickEntry(empId, weekStart){
+function openQuickEntry(empId){
+  const weekStart = periodStartAtOffset(state.periodOffset);
   root.innerHTML = `
     <div class="card">
       <h2>הזנה מהירה — סך שעות</h2>
-      <p class="muted">שבוע: ${fmtDateHe(weekStart)} – ${fmtDateHe(addDays(weekStart,6))}</p>
+      <div class="nav-period">
+        <button id="btn-prev-w">›</button>
+        <div class="period-label">
+          <b>${fmtDateHe(weekStart)} – ${fmtDateHe(addDays(weekStart,6))}</b><br>
+          <span class="muted">${state.periodOffset===0?'השבוע הנוכחי':state.periodOffset+' שבועות אחורה'}</span>
+        </div>
+        <button id="btn-next-w" ${state.periodOffset===0?'disabled style="opacity:.3"':''}>‹</button>
+      </div>
+      <div class="divider"></div>
       <div class="row">
         <div style="flex:1;">
           <label>שעות</label>
@@ -573,24 +588,27 @@ function openQuickEntry(empId, weekStart){
           <input id="f-m" type="number" step="1" min="0" max="59" placeholder="0">
         </div>
       </div>
-      <p class="muted">לדוגמה: 3 שעות ו-30 דקות — יש להזין 3 בשדה שעות ו-30 בשדה דקות.</p>
+      <p class="muted">לדוגמה: 3 שעות ו-30 דקות — יש להזין 3 בשדה שעות ו-30 בשדה דקות. חשוב לוודא שהשבוע המוצג למעלה הוא השבוע הנכון לפני השמירה.</p>
       <div class="row" style="margin-top:16px;">
         <button class="btn btn-primary" id="btn-save">שמירה</button>
         <button class="btn btn-ghost" id="btn-cancel">ביטול</button>
       </div>
     </div>
   `;
+  document.getElementById('btn-prev-w').onclick = ()=>{ state.periodOffset++; openQuickEntry(empId); };
+  document.getElementById('btn-next-w').onclick = ()=>{ if(state.periodOffset>0){ state.periodOffset--; openQuickEntry(empId); } };
   document.getElementById('btn-cancel').onclick = ()=>renderEmployeeDetail(empId);
   document.getElementById('btn-save').onclick = async ()=>{
     const h = parseFloat(document.getElementById('f-h').value) || 0;
     const m = parseFloat(document.getElementById('f-m').value) || 0;
     const hours = h + (m/60);
     if(hours <= 0){ toast('נא להזין שעות ו/או דקות'); return; }
+    const targetWeek = periodStartAtOffset(state.periodOffset);
     await db.collection('shifts').add({
-      employeeId: empId, manualTotalHours: hours, periodKey: periodKeyOf(weekStart),
+      employeeId: empId, manualTotalHours: hours, periodKey: periodKeyOf(targetWeek),
       checkIn: null, checkOut: null, needsReview:false, note:'הזנה מהירה'
     });
-    await loadAll(); renderEmployeeDetail(empId); toast('נשמר');
+    await loadAll(); renderEmployeeDetail(empId); toast('נשמר על השבוע: ' + fmtDateHe(targetWeek) + ' – ' + fmtDateHe(addDays(targetWeek,6)));
   };
 }
 
