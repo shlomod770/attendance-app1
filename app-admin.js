@@ -8,8 +8,11 @@ let state = {
   shifts: [],
   payments: [],
   config: { qrToken:'', adminCode:'1234', periodStartDay:5 },
-  periodOffset: 0, // 0 = current period, 1 = one period back, ...
-  tab: 'dashboard'
+  periodOffset: 0,
+  tab: 'dashboard',
+  detailEmployeeId: null,
+  reportMode: 'week', // week | month | year
+  reportOffset: 0
 };
 
 function toast(msg){
@@ -22,6 +25,7 @@ function toast(msg){
 
 // ---------- date helpers ----------
 function addDays(d, n){ const r = new Date(d); r.setDate(r.getDate()+n); return r; }
+function addMonths(d, n){ const r = new Date(d); r.setMonth(r.getMonth()+n); return r; }
 function startOfDay(d){ const r = new Date(d); r.setHours(0,0,0,0); return r; }
 function dateKey(d){ return startOfDay(d).toISOString().slice(0,10); }
 function fmtDateHe(d){ return d.toLocaleDateString('he-IL', {day:'2-digit', month:'2-digit', year:'numeric'}); }
@@ -38,13 +42,11 @@ function periodStartFor(date, startDay){
   const diff = (d.getDay() - startDay + 7) % 7;
   return addDays(d, -diff);
 }
-function currentPeriodStart(){
-  return periodStartFor(new Date(), state.config.periodStartDay);
-}
-function periodStartAtOffset(offset){
-  return addDays(currentPeriodStart(), -7*offset);
-}
+function currentPeriodStart(){ return periodStartFor(new Date(), state.config.periodStartDay); }
+function periodStartAtOffset(offset){ return addDays(currentPeriodStart(), -7*offset); }
 function periodKeyOf(startDate){ return dateKey(startDate); }
+function startOfMonth(d){ return new Date(d.getFullYear(), d.getMonth(), 1); }
+function startOfYear(d){ return new Date(d.getFullYear(), 0, 1); }
 
 // ---------- data loading ----------
 async function loadAll(){
@@ -64,12 +66,9 @@ async function loadAll(){
     await db.collection('config').doc('main').set(state.config);
   }
 }
+function genToken(){ return 'shop-' + Math.random().toString(36).slice(2) + Date.now().toString(36); }
 
-function genToken(){
-  return 'shop-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
-}
-
-// ---------- computed aggregates ----------
+// ---------- shift helpers ----------
 function shiftDurationHours(s){
   if(s.manualTotalHours != null) return s.manualTotalHours;
   if(!s.checkIn || !s.checkOut) return 0;
@@ -77,39 +76,55 @@ function shiftDurationHours(s){
   const outD = s.checkOut.toDate ? s.checkOut.toDate() : new Date(s.checkOut);
   return Math.max(0, (outD - inD) / 3600000);
 }
+function shiftEffectiveDate(s){
+  if(s.manualTotalHours != null) return new Date(s.periodKey + 'T00:00:00');
+  if(!s.checkIn) return null;
+  return s.checkIn.toDate ? s.checkIn.toDate() : new Date(s.checkIn);
+}
+function isCountable(s){ return s.manualTotalHours != null || !!s.checkOut; }
 
+// ---------- lifetime (global) balance — the single clear "how much do I owe now" number ----------
 function employeeLifetimeStats(empId){
   const rate = (state.employees.find(e=>e.id===empId)||{}).hourlyRate || 0;
   const hours = state.shifts
-    .filter(s=>s.employeeId===empId && (s.manualTotalHours!=null || s.checkOut))
+    .filter(s=>s.employeeId===empId && isCountable(s))
     .reduce((sum,s)=>sum+shiftDurationHours(s), 0);
   const paid = state.payments.filter(p=>p.employeeId===empId).reduce((s,p)=>s+(p.amount||0),0);
   const earned = hours*rate;
   return { hours, earned, paid, remaining: earned-paid };
 }
 
-function shiftsForPeriod(empId, periodStart){
-  const key = periodKeyOf(periodStart);
-  const periodEnd = addDays(periodStart,7);
-  return state.shifts.filter(s=>{
-    if(s.employeeId !== empId) return false;
-    if(s.manualTotalHours != null) return s.periodKey === key;
-    if(!s.checkIn) return false;
-    const inD = s.checkIn.toDate ? s.checkIn.toDate() : new Date(s.checkIn);
-    return inD >= periodStart && inD < periodEnd;
-  });
-}
-function paymentsForPeriod(empId, periodStart){
-  const key = periodKeyOf(periodStart);
-  return state.payments.filter(p=>p.employeeId===empId && p.periodKey===key);
-}
-function periodStatsForEmployee(empId, periodStart){
+// ---------- range stats (for week/month/year "how much for this range" info panels) ----------
+function statsForRange(empId, startDate, endDateExcl){
   const rate = (state.employees.find(e=>e.id===empId)||{}).hourlyRate || 0;
-  const shifts = shiftsForPeriod(empId, periodStart);
+  const shifts = state.shifts.filter(s=>{
+    if(s.employeeId !== empId || !isCountable(s)) return false;
+    const d = shiftEffectiveDate(s);
+    return d && d >= startDate && d < endDateExcl;
+  });
   const hours = shifts.reduce((s,sh)=>s+shiftDurationHours(sh),0);
-  const paid = paymentsForPeriod(empId, periodStart).reduce((s,p)=>s+(p.amount||0),0);
+  const pays = state.payments.filter(p=>{
+    if(p.employeeId !== empId || !p.date) return false;
+    const d = p.date.toDate ? p.date.toDate() : new Date(p.date);
+    return d >= startDate && d < endDateExcl;
+  });
+  const paid = pays.reduce((s,p)=>s+(p.amount||0),0);
   const earned = hours*rate;
-  return { hours, earned, paid, remaining: earned-paid, shifts };
+  return { hours, earned, paid, shifts, payments: pays };
+}
+function weekStats(empId, offset){
+  const start = periodStartAtOffset(offset);
+  return { start, end: addDays(start,7), ...statsForRange(empId, start, addDays(start,7)) };
+}
+function monthStats(empId, offset){
+  const base = addMonths(startOfMonth(new Date()), -offset);
+  const end = addMonths(base,1);
+  return { start: base, end, ...statsForRange(empId, base, end) };
+}
+function yearStats(empId, offset){
+  const base = new Date(new Date().getFullYear()-offset, 0, 1);
+  const end = new Date(base.getFullYear()+1,0,1);
+  return { start: base, end, ...statsForRange(empId, base, end) };
 }
 
 function hasOpenShift(empId){
@@ -122,13 +137,9 @@ function hasReviewShift(empId){
 // ---------- gate ----------
 async function boot(){
   await loadAll();
-  if(localStorage.getItem(LS_ADMIN_OK) === '1'){
-    renderApp();
-  } else {
-    renderGate();
-  }
+  if(localStorage.getItem(LS_ADMIN_OK) === '1') renderApp();
+  else renderGate();
 }
-
 function renderGate(){
   tabsEl.innerHTML = '';
   root.innerHTML = `
@@ -155,22 +166,22 @@ function renderGate(){
 const TABS = [
   ['dashboard','דשבורד'],
   ['employees','עובדים'],
-  ['periods','תקופות שכר'],
   ['reports','דוחות'],
   ['qr','QR'],
   ['settings','הגדרות']
 ];
-
 function renderApp(){
   tabsEl.innerHTML = TABS.map(([id,label])=>
     `<button class="tab ${state.tab===id?'active':''}" data-tab="${id}">${label}</button>`
   ).join('');
   tabsEl.querySelectorAll('.tab').forEach(btn=>{
-    btn.onclick = ()=>{ state.tab = btn.dataset.tab; renderApp(); };
+    btn.onclick = ()=>{ state.tab = btn.dataset.tab; state.detailEmployeeId=null; renderApp(); };
   });
   if(state.tab==='dashboard') renderDashboard();
-  else if(state.tab==='employees') renderEmployees();
-  else if(state.tab==='periods') renderPeriods();
+  else if(state.tab==='employees'){
+    if(state.detailEmployeeId) renderEmployeeDetail(state.detailEmployeeId);
+    else renderEmployees();
+  }
   else if(state.tab==='reports') renderReports();
   else if(state.tab==='qr') renderQr();
   else if(state.tab==='settings') renderSettings();
@@ -178,30 +189,41 @@ function renderApp(){
 
 // ---------- dashboard ----------
 function renderDashboard(){
-  const periodStart = currentPeriodStart();
-  const periodEnd = addDays(periodStart,6);
   const active = state.employees.filter(e=>e.active!==false);
-  let totalEarned=0, totalPaid=0;
+  const wStart = currentPeriodStart(), wEnd = addDays(wStart,6);
+  const mStart = startOfMonth(new Date()), mEnd = addMonths(mStart,1);
+
+  let wEarn=0,wPaid=0,mEarn=0,mPaid=0,totalOwed=0;
   active.forEach(e=>{
-    const st = periodStatsForEmployee(e.id, periodStart);
-    totalEarned += st.earned; totalPaid += st.paid;
+    const w = statsForRange(e.id, wStart, addDays(wStart,7));
+    const m = statsForRange(e.id, mStart, mEnd);
+    wEarn+=w.earned; wPaid+=w.paid; mEarn+=m.earned; mPaid+=m.paid;
+    totalOwed += employeeLifetimeStats(e.id).remaining;
   });
   const alerts = active.filter(e=>hasOpenShift(e.id) || hasReviewShift(e.id));
 
   root.innerHTML = `
     <div class="card">
-      <p class="muted">תקופה נוכחית</p>
-      <h2>${fmtDateHe(periodStart)} – ${fmtDateHe(periodEnd)}</h2>
-      <div class="divider"></div>
-      <div class="row between"><span>סה"כ לתשלום לכולם</span><b class="mono">${money(totalEarned)}</b></div>
-      <div class="row between"><span>כבר שולם</span><b class="mono">${money(totalPaid)}</b></div>
-      <div class="row between"><span>נותר לתשלום</span><b class="mono">${money(totalEarned-totalPaid)}</b></div>
+      <p class="muted">סה"כ חוב כולל לכל העובדים כרגע</p>
+      <div class="big-num">${money(totalOwed)}</div>
+    </div>
+    <div class="card">
+      <div class="row between"><h3>השבוע</h3><span class="muted">${fmtDateHe(wStart)} - ${fmtDateHe(wEnd)}</span></div>
+      <div class="row between"><span>הגיע לעובדים</span><b class="mono">${money(wEarn)}</b></div>
+      <div class="row between"><span>שולם</span><b class="mono">${money(wPaid)}</b></div>
+    </div>
+    <div class="card">
+      <div class="row between"><h3>החודש</h3><span class="muted">${mStart.toLocaleDateString('he-IL',{month:'long',year:'numeric'})}</span></div>
+      <div class="row between"><span>הגיע לעובדים</span><b class="mono">${money(mEarn)}</b></div>
+      <div class="row between"><span>שולם</span><b class="mono">${money(mPaid)}</b></div>
+    </div>
+    <div class="card">
       <div class="row between"><span>עובדים פעילים</span><b class="mono">${active.length}</b></div>
     </div>
     ${alerts.length ? `<div class="card">
       <h3>דורש תשומת לב</h3>
       ${alerts.map(e=>`
-        <div class="row between" style="margin-top:8px;">
+        <div class="row between" style="margin-top:8px;cursor:pointer;" data-goto="${e.id}">
           <span>${e.name}</span>
           <span>
             ${hasOpenShift(e.id)?'<span class="tag tag-open">משמרת פתוחה</span> ':''}
@@ -210,9 +232,12 @@ function renderDashboard(){
         </div>`).join('')}
     </div>` : ''}
   `;
+  root.querySelectorAll('[data-goto]').forEach(el=>el.onclick=()=>{
+    state.tab='employees'; state.detailEmployeeId = el.dataset.goto; renderApp();
+  });
 }
 
-// ---------- employees ----------
+// ---------- employees list ----------
 function renderEmployees(){
   root.innerHTML = `
     <div class="card">
@@ -227,7 +252,7 @@ function renderEmployees(){
     const card = document.createElement('div');
     card.className = 'card';
     card.innerHTML = `
-      <div class="row between">
+      <div class="row between" style="cursor:pointer;" data-open="${e.id}">
         <div>
           <b>${e.name}</b> ${e.active===false?'<span class="tag tag-off">מושבת</span>':''}
           ${hasOpenShift(e.id)?'<span class="tag tag-open">משמרת פתוחה</span>':''}
@@ -235,28 +260,15 @@ function renderEmployees(){
           <div class="muted">משתמש: ${e.username} · ${money(e.hourlyRate)}/שעה</div>
         </div>
         <div class="mono" style="text-align:left;">
-          <div class="muted" style="font-size:12px;">יתרה כוללת</div>
+          <div class="muted" style="font-size:12px;">חוב כרגע</div>
           <b>${money(stats.remaining)}</b>
         </div>
-      </div>
-      <div class="row" style="margin-top:10px;">
-        <button class="btn btn-ghost btn-sm" data-edit="${e.id}">עריכה</button>
-        <button class="btn btn-ghost btn-sm" data-reset="${e.id}">איפוס מכשיר</button>
-        <button class="btn btn-ghost btn-sm" data-toggle="${e.id}">${e.active===false?'הפעלה':'השבתה'}</button>
       </div>
     `;
     list.appendChild(card);
   });
-  list.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>openEmployeeForm(b.dataset.edit));
-  list.querySelectorAll('[data-reset]').forEach(b=>b.onclick=async()=>{
-    if(!confirm('לאפס את שיוך המכשיר של העובד?')) return;
-    await db.collection('employees').doc(b.dataset.reset).update({deviceId: firebase.firestore.FieldValue.delete()});
-    await loadAll(); renderEmployees(); toast('המכשיר אופס');
-  });
-  list.querySelectorAll('[data-toggle]').forEach(b=>b.onclick=async()=>{
-    const emp = state.employees.find(x=>x.id===b.dataset.toggle);
-    await db.collection('employees').doc(emp.id).update({active: emp.active===false ? true : false});
-    await loadAll(); renderEmployees();
+  list.querySelectorAll('[data-open]').forEach(b=>b.onclick=()=>{
+    state.detailEmployeeId = b.dataset.open; renderApp();
   });
 }
 
@@ -275,7 +287,9 @@ function openEmployeeForm(empId){
       </div>
     </div>
   `;
-  document.getElementById('btn-cancel-emp').onclick = renderEmployees;
+  document.getElementById('btn-cancel-emp').onclick = ()=>{
+    if(emp) renderEmployeeDetail(emp.id); else renderEmployees();
+  };
   document.getElementById('btn-save-emp').onclick = async ()=>{
     const data = {
       name: document.getElementById('f-name').value.trim(),
@@ -285,159 +299,286 @@ function openEmployeeForm(empId){
       active: emp ? (emp.active!==false) : true
     };
     if(!data.name || !data.username || !data.pin){ toast('נא למלא את כל השדות'); return; }
+    let id = empId;
     if(emp){
       await db.collection('employees').doc(emp.id).update(data);
     } else {
       data.deviceId = null;
-      await db.collection('employees').add(data);
+      const ref = await db.collection('employees').add(data);
+      id = ref.id;
     }
-    await loadAll(); renderEmployees(); toast('נשמר');
+    await loadAll();
+    state.detailEmployeeId = id;
+    renderApp();
+    toast('נשמר');
   };
 }
 
-// ---------- periods ----------
-function renderPeriods(){
-  const periodStart = periodStartAtOffset(state.periodOffset);
-  const periodEnd = addDays(periodStart,6);
-  const key = periodKeyOf(periodStart);
-  const active = state.employees.filter(e=>e.active!==false);
+// ---------- employee detail (central hub) ----------
+function renderEmployeeDetail(empId){
+  const emp = state.employees.find(e=>e.id===empId);
+  if(!emp){ state.detailEmployeeId=null; renderEmployees(); return; }
+  const life = employeeLifetimeStats(empId);
+  const w = weekStats(empId, state.periodOffset);
 
   root.innerHTML = `
+    <div class="row between no-print" style="margin-bottom:6px;">
+      <a href="#" id="back-link" class="muted" style="text-decoration:underline;">← חזרה לרשימה</a>
+    </div>
+    <div class="card">
+      <div class="row between">
+        <div>
+          <h2>${emp.name}</h2>
+          <span class="muted">${emp.username} · ${money(emp.hourlyRate)}/שעה</span>
+          ${emp.active===false?' <span class="tag tag-off">מושבת</span>':''}
+          ${hasOpenShift(emp.id)?' <span class="tag tag-open">משמרת פתוחה</span>':''}
+          ${hasReviewShift(emp.id)?' <span class="tag tag-review">דורש בדיקה</span>':''}
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <button class="btn btn-ghost btn-sm" id="btn-edit-emp">עריכת פרטים</button>
+        <button class="btn btn-ghost btn-sm" id="btn-reset-dev">איפוס מכשיר</button>
+        <button class="btn btn-ghost btn-sm" id="btn-toggle-active">${emp.active===false?'הפעלה':'השבתה'}</button>
+      </div>
+    </div>
+
+    <div class="card center">
+      <p class="muted">חוב כולל כרגע (כל הזמנים)</p>
+      <div class="big-num">${money(life.remaining)}</div>
+      <p class="muted mono" style="margin-top:4px;">${fmtHours(life.hours)} שעות סה"כ · ${money(life.earned)} הגיע · ${money(life.paid)} שולם</p>
+      <div class="row" style="margin-top:12px;">
+        <button class="btn btn-brass" id="btn-add-payment">רישום תשלום</button>
+      </div>
+    </div>
+
     <div class="card">
       <div class="nav-period">
-        <button id="btn-prev">›</button>
+        <button id="btn-prev-w">›</button>
         <div class="period-label">
-          <b>${fmtDateHe(periodStart)} – ${fmtDateHe(periodEnd)}</b><br>
-          <span class="muted">${state.periodOffset===0?'התקופה הנוכחית':state.periodOffset+' תקופות אחורה'}</span>
+          <b>${fmtDateHe(w.start)} – ${fmtDateHe(addDays(w.start,6))}</b><br>
+          <span class="muted">שעות השבוע: ${fmtHours(w.hours)} · ${money(w.earned)}</span>
         </div>
-        <button id="btn-next" ${state.periodOffset===0?'disabled style="opacity:.3"':''}>‹</button>
+        <button id="btn-next-w" ${state.periodOffset===0?'disabled style="opacity:.3"':''}>‹</button>
+      </div>
+      <div class="divider"></div>
+      <div id="week-shifts"></div>
+      <div class="row" style="margin-top:10px;">
+        <button class="btn btn-ghost btn-sm" id="btn-quick">הזנה מהירה (סך שעות)</button>
+        <button class="btn btn-ghost btn-sm" id="btn-detail">הזנת משמרת מדויקת</button>
       </div>
     </div>
-    <div id="period-emps"></div>
+
     <div class="card">
-      <button class="btn btn-ghost" id="btn-quick">הזנה מהירה של סך שעות</button>
-      <button class="btn btn-ghost" style="margin-top:8px;" id="btn-detail">הזנת משמרת מפורטת</button>
+      <h3>כל התשלומים</h3>
+      <div id="all-payments"></div>
     </div>
   `;
-  document.getElementById('btn-prev').onclick = ()=>{ state.periodOffset++; renderPeriods(); };
-  document.getElementById('btn-next').onclick = ()=>{ if(state.periodOffset>0){ state.periodOffset--; renderPeriods(); } };
-  document.getElementById('btn-quick').onclick = ()=>openQuickEntry(periodStart);
-  document.getElementById('btn-detail').onclick = ()=>openDetailEntry();
 
-  const cont = document.getElementById('period-emps');
-  active.forEach(e=>{
-    const st = periodStatsForEmployee(e.id, periodStart);
-    const card = document.createElement('div');
-    card.className = 'card';
-    card.innerHTML = `
-      <div class="row between">
-        <b>${e.name}</b>
-        <span class="mono">${fmtHours(st.hours)} ש'</span>
+  document.getElementById('back-link').onclick = (e)=>{ e.preventDefault(); state.detailEmployeeId=null; renderApp(); };
+  document.getElementById('btn-edit-emp').onclick = ()=>openEmployeeForm(emp.id);
+  document.getElementById('btn-reset-dev').onclick = async ()=>{
+    if(!confirm('לאפס את שיוך המכשיר של העובד?')) return;
+    await db.collection('employees').doc(emp.id).update({deviceId: firebase.firestore.FieldValue.delete()});
+    await loadAll(); renderEmployeeDetail(empId); toast('המכשיר אופס');
+  };
+  document.getElementById('btn-toggle-active').onclick = async ()=>{
+    await db.collection('employees').doc(emp.id).update({active: emp.active===false ? true : false});
+    await loadAll(); renderEmployeeDetail(empId);
+  };
+  document.getElementById('btn-add-payment').onclick = ()=>openPaymentForm(emp.id, null);
+  document.getElementById('btn-prev-w').onclick = ()=>{ state.periodOffset++; renderEmployeeDetail(empId); };
+  document.getElementById('btn-next-w').onclick = ()=>{ if(state.periodOffset>0){ state.periodOffset--; renderEmployeeDetail(empId); } };
+  document.getElementById('btn-quick').onclick = ()=>openQuickEntry(empId, w.start);
+  document.getElementById('btn-detail').onclick = ()=>openDetailEntry(empId);
+
+  const wsCont = document.getElementById('week-shifts');
+  if(!w.shifts.length && !hasOpenShiftInWeek(empId, w.start)){
+    wsCont.innerHTML = '<p class="muted">אין רישומים בשבוע זה.</p>';
+  } else {
+    const openInWeek = state.shifts.filter(s=>s.employeeId===empId && !s.checkOut && s.manualTotalHours==null);
+    wsCont.innerHTML = [...w.shifts, ...openInWeek].map(s=>shiftRowHtml(s)).join('');
+    wsCont.querySelectorAll('[data-edit-shift]').forEach(b=>b.onclick=()=>openEditShift(b.dataset.editShift, empId));
+  }
+
+  const payCont = document.getElementById('all-payments');
+  const emPays = state.payments.filter(p=>p.employeeId===empId).sort((a,b)=>{
+    const da = a.date && a.date.toDate ? a.date.toDate() : new Date(a.date||0);
+    const db_ = b.date && b.date.toDate ? b.date.toDate() : new Date(b.date||0);
+    return db_-da;
+  });
+  if(!emPays.length){
+    payCont.innerHTML = '<p class="muted">אין עדיין תשלומים רשומים.</p>';
+  } else {
+    payCont.innerHTML = emPays.map(p=>{
+      const d = p.date && p.date.toDate ? p.date.toDate() : new Date(p.date);
+      return `<div class="row between" style="padding:6px 0;border-bottom:1px solid var(--line);">
+        <span>${fmtDateHe(d)}</span>
+        <span class="mono">${money(p.amount)}</span>
+        <span>
+          <button class="btn btn-ghost btn-sm" data-edit-pay="${p.id}">עריכה</button>
+          <button class="btn btn-ghost btn-sm" data-del-pay="${p.id}">מחיקה</button>
+        </span>
+      </div>`;
+    }).join('');
+    payCont.querySelectorAll('[data-edit-pay]').forEach(b=>b.onclick=()=>openPaymentForm(empId, b.dataset.editPay));
+    payCont.querySelectorAll('[data-del-pay]').forEach(b=>b.onclick=async()=>{
+      if(!confirm('למחוק תשלום זה?')) return;
+      await db.collection('payments').doc(b.dataset.delPay).delete();
+      await loadAll(); renderEmployeeDetail(empId);
+    });
+  }
+}
+
+function hasOpenShiftInWeek(empId, weekStart){
+  return state.shifts.some(s=>s.employeeId===empId && !s.checkOut && s.manualTotalHours==null && s.checkIn &&
+    (s.checkIn.toDate?s.checkIn.toDate():new Date(s.checkIn)) >= weekStart);
+}
+
+function shiftRowHtml(s){
+  let desc;
+  if(s.manualTotalHours!=null){
+    desc = `הזנה כוללת: ${fmtHours(s.manualTotalHours)} שעות`;
+  } else {
+    const inD = s.checkIn.toDate ? s.checkIn.toDate() : new Date(s.checkIn);
+    const outD = s.checkOut ? (s.checkOut.toDate ? s.checkOut.toDate() : new Date(s.checkOut)) : null;
+    desc = `${fmtDateHe(inD)} · ${fmtTimeHe(inD)} → ${outD?fmtTimeHe(outD):'פתוחה'} ${s.needsReview?'<span class="tag tag-review">דורש בדיקה</span>':''}`;
+  }
+  return `<div class="row between" style="padding:6px 0;border-bottom:1px solid var(--line);">
+    <span style="font-size:13px;">${desc}</span>
+    <button class="btn btn-ghost btn-sm" data-edit-shift="${s.id}">עריכה</button>
+  </div>`;
+}
+
+function openEditShift(shiftId, empId){
+  const s = state.shifts.find(x=>x.id===shiftId);
+  if(!s) return;
+  if(s.manualTotalHours != null){
+    root.innerHTML = `
+      <div class="card">
+        <h2>עריכת הזנה כוללת</h2>
+        <label>סך השעות</label>
+        <input id="f-hours" type="number" step="0.25" value="${s.manualTotalHours}">
+        <div class="row" style="margin-top:16px;">
+          <button class="btn btn-primary" id="btn-save">שמירה</button>
+          <button class="btn btn-danger" id="btn-del">מחיקה</button>
+          <button class="btn btn-ghost" id="btn-cancel">ביטול</button>
+        </div>
       </div>
-      <div class="row between muted"><span>הגיע לו</span><span class="mono">${money(st.earned)}</span></div>
-      <div class="row between muted"><span>שולם</span><span class="mono">${money(st.paid)}</span></div>
-      <div class="row between"><b>נותר לתקופה זו</b><b class="mono">${money(st.remaining)}</b></div>
-      <div class="row" style="margin-top:10px;">
-        <button class="btn btn-ghost btn-sm" data-pay="${e.id}">רישום תשלום</button>
-        <button class="btn btn-ghost btn-sm" data-details="${e.id}">פרטי משמרות (${st.shifts.length})</button>
-      </div>
-      <div class="shift-details hidden" id="det-${e.id}"></div>
     `;
-    cont.appendChild(card);
-  });
-  cont.querySelectorAll('[data-pay]').forEach(b=>b.onclick=()=>openPaymentForm(b.dataset.pay, periodStart));
-  cont.querySelectorAll('[data-details]').forEach(b=>b.onclick=()=>{
-    const el = document.getElementById('det-'+b.dataset.details);
-    if(el.classList.contains('hidden')){
-      el.classList.remove('hidden');
-      renderShiftDetails(el, b.dataset.details, periodStart);
-    } else { el.classList.add('hidden'); el.innerHTML=''; }
-  });
-}
-
-function renderShiftDetails(el, empId, periodStart){
-  const shifts = shiftsForPeriod(empId, periodStart);
-  if(!shifts.length){ el.innerHTML = '<p class="muted">אין רישומים בתקופה זו.</p>'; return; }
-  el.innerHTML = '<div class="divider"></div>' + shifts.map(s=>{
-    let desc;
-    if(s.manualTotalHours!=null){
-      desc = `הזנה כוללת: ${fmtHours(s.manualTotalHours)} ש'`;
-    } else {
-      const inD = s.checkIn.toDate ? s.checkIn.toDate() : new Date(s.checkIn);
-      const outD = s.checkOut ? (s.checkOut.toDate ? s.checkOut.toDate() : new Date(s.checkOut)) : null;
-      desc = `${fmtDateHe(inD)} · ${fmtTimeHe(inD)} - ${outD?fmtTimeHe(outD):'—'} ${s.needsReview?'<span class="tag tag-review">דורש בדיקה</span>':''}`;
-    }
-    return `<div class="row between" style="padding:6px 0;">
-      <span style="font-size:13px;">${desc}</span>
-      <span>
-        <button class="btn btn-ghost btn-sm" data-del-shift="${s.id}">מחיקה</button>
-      </span>
-    </div>`;
-  }).join('');
-  el.querySelectorAll('[data-del-shift]').forEach(b=>b.onclick=async()=>{
-    if(!confirm('למחוק רישום זה?')) return;
-    await db.collection('shifts').doc(b.dataset.delShift).delete();
-    await loadAll(); renderPeriods();
-  });
-}
-
-function openQuickEntry(periodStart){
-  const active = state.employees.filter(e=>e.active!==false);
+    document.getElementById('btn-cancel').onclick = ()=>renderEmployeeDetail(empId);
+    document.getElementById('btn-save').onclick = async ()=>{
+      const hours = parseFloat(document.getElementById('f-hours').value);
+      if(!hours || hours<=0){ toast('נא להזין שעות'); return; }
+      await db.collection('shifts').doc(shiftId).update({manualTotalHours: hours});
+      await loadAll(); renderEmployeeDetail(empId); toast('נשמר');
+    };
+    document.getElementById('btn-del').onclick = async ()=>{
+      if(!confirm('למחוק רישום זה?')) return;
+      await db.collection('shifts').doc(shiftId).delete();
+      await loadAll(); renderEmployeeDetail(empId);
+    };
+    return;
+  }
+  const inD = s.checkIn.toDate ? s.checkIn.toDate() : new Date(s.checkIn);
+  const outD = s.checkOut ? (s.checkOut.toDate ? s.checkOut.toDate() : new Date(s.checkOut)) : null;
   root.innerHTML = `
     <div class="card">
-      <h2>הזנה מהירה — סך שעות</h2>
-      <p class="muted">תקופה: ${fmtDateHe(periodStart)} – ${fmtDateHe(addDays(periodStart,6))}</p>
-      <label>עובד</label>
-      <select id="f-emp">${active.map(e=>`<option value="${e.id}">${e.name}</option>`).join('')}</select>
-      <label>סך השעות בתקופה זו</label>
-      <input id="f-hours" type="number" step="0.25" placeholder="לדוגמה 38.5">
+      <h2>עריכת משמרת</h2>
+      <label>תאריך כניסה</label>
+      <input id="f-date" type="date" value="${toInputDate(inD)}">
+      <label>שעת כניסה</label>
+      <input id="f-in" type="time" value="${toInputTime(inD)}">
+      <label>שעת יציאה (השאירו ריק כדי להשאיר משמרת פתוחה)</label>
+      <input id="f-out" type="time" value="${outD?toInputTime(outD):''}">
+      <label>תאריך יציאה</label>
+      <input id="f-outdate" type="date" value="${outD?toInputDate(outD):toInputDate(inD)}">
       <div class="row" style="margin-top:16px;">
-        <button class="btn btn-primary" id="btn-save-quick">שמירה</button>
-        <button class="btn btn-ghost" id="btn-cancel-quick">ביטול</button>
+        <button class="btn btn-primary" id="btn-save">שמירה</button>
+        <button class="btn btn-ghost btn-sm" id="btn-clear-out">נקה שעת יציאה בלבד</button>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <button class="btn btn-danger" id="btn-del">מחיקת המשמרת כולה</button>
+        <button class="btn btn-ghost" id="btn-cancel">ביטול</button>
       </div>
     </div>
   `;
-  document.getElementById('btn-cancel-quick').onclick = renderPeriods;
-  document.getElementById('btn-save-quick').onclick = async ()=>{
-    const empId = document.getElementById('f-emp').value;
-    const hours = parseFloat(document.getElementById('f-hours').value);
-    if(!hours || hours<=0){ toast('נא להזין מספר שעות'); return; }
-    await db.collection('shifts').add({
-      employeeId: empId,
-      manualTotalHours: hours,
-      periodKey: periodKeyOf(periodStart),
-      checkIn: null, checkOut: null, needsReview:false, note:'הזנה מהירה'
-    });
-    await loadAll(); renderPeriods(); toast('נשמר');
+  document.getElementById('btn-cancel').onclick = ()=>renderEmployeeDetail(empId);
+  document.getElementById('btn-clear-out').onclick = async ()=>{
+    await db.collection('shifts').doc(shiftId).update({checkOut:null, needsReview:false});
+    await loadAll(); renderEmployeeDetail(empId); toast('שעת היציאה נוקתה — המשמרת פתוחה כעת');
+  };
+  document.getElementById('btn-del').onclick = async ()=>{
+    if(!confirm('למחוק את המשמרת הזו לגמרי?')) return;
+    await db.collection('shifts').doc(shiftId).delete();
+    await loadAll(); renderEmployeeDetail(empId);
+  };
+  document.getElementById('btn-save').onclick = async ()=>{
+    const dateStr = document.getElementById('f-date').value;
+    const inTime = document.getElementById('f-in').value;
+    const outTime = document.getElementById('f-out').value;
+    const outDateStr = document.getElementById('f-outdate').value;
+    if(!dateStr || !inTime){ toast('נא למלא תאריך ושעת כניסה'); return; }
+    const newIn = new Date(`${dateStr}T${inTime}:00`);
+    let update = { checkIn: firebase.firestore.Timestamp.fromDate(newIn), needsReview:false };
+    if(outTime){
+      const newOut = new Date(`${outDateStr||dateStr}T${outTime}:00`);
+      update.checkOut = firebase.firestore.Timestamp.fromDate(newOut);
+    } else {
+      update.checkOut = null;
+    }
+    await db.collection('shifts').doc(shiftId).update(update);
+    await loadAll(); renderEmployeeDetail(empId); toast('נשמר');
   };
 }
 
 function toInputDate(d){ return d.toISOString().slice(0,10); }
+function toInputTime(d){ return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }
 
-function openDetailEntry(){
-  const active = state.employees.filter(e=>e.active!==false);
+function openQuickEntry(empId, weekStart){
+  root.innerHTML = `
+    <div class="card">
+      <h2>הזנה מהירה — סך שעות</h2>
+      <p class="muted">שבוע: ${fmtDateHe(weekStart)} – ${fmtDateHe(addDays(weekStart,6))}</p>
+      <label>סך השעות בשבוע זה</label>
+      <input id="f-hours" type="number" step="0.25" placeholder="לדוגמה 38.5">
+      <div class="row" style="margin-top:16px;">
+        <button class="btn btn-primary" id="btn-save">שמירה</button>
+        <button class="btn btn-ghost" id="btn-cancel">ביטול</button>
+      </div>
+    </div>
+  `;
+  document.getElementById('btn-cancel').onclick = ()=>renderEmployeeDetail(empId);
+  document.getElementById('btn-save').onclick = async ()=>{
+    const hours = parseFloat(document.getElementById('f-hours').value);
+    if(!hours || hours<=0){ toast('נא להזין מספר שעות'); return; }
+    await db.collection('shifts').add({
+      employeeId: empId, manualTotalHours: hours, periodKey: periodKeyOf(weekStart),
+      checkIn: null, checkOut: null, needsReview:false, note:'הזנה מהירה'
+    });
+    await loadAll(); renderEmployeeDetail(empId); toast('נשמר');
+  };
+}
+
+function openDetailEntry(empId){
   const today = toInputDate(new Date());
   root.innerHTML = `
     <div class="card">
-      <h2>הזנת משמרת מפורטת</h2>
-      <label>עובד</label>
-      <select id="f-emp">${active.map(e=>`<option value="${e.id}">${e.name}</option>`).join('')}</select>
+      <h2>הזנת משמרת מדויקת</h2>
       <label>תאריך כניסה</label>
       <input id="f-date" type="date" value="${today}">
       <label>שעת כניסה</label>
       <input id="f-in" type="time" value="09:00">
       <label>שעת יציאה</label>
       <input id="f-out" type="time" value="17:00">
-      <p class="muted">אם היציאה מוקדמת יותר מהכניסה, המערכת תניח שהיציאה הייתה למחרת (משמרת לילה).</p>
+      <p class="muted">אם היציאה מוקדמת מהכניסה, המערכת תניח שהיציאה הייתה למחרת (משמרת לילה).</p>
       <div class="row" style="margin-top:16px;">
-        <button class="btn btn-primary" id="btn-save-detail">שמירה</button>
-        <button class="btn btn-ghost" id="btn-cancel-detail">ביטול</button>
+        <button class="btn btn-primary" id="btn-save">שמירה</button>
+        <button class="btn btn-ghost" id="btn-cancel">ביטול</button>
       </div>
     </div>
   `;
-  document.getElementById('btn-cancel-detail').onclick = renderPeriods;
-  document.getElementById('btn-save-detail').onclick = async ()=>{
-    const empId = document.getElementById('f-emp').value;
+  document.getElementById('btn-cancel').onclick = ()=>renderEmployeeDetail(empId);
+  document.getElementById('btn-save').onclick = async ()=>{
     const dateStr = document.getElementById('f-date').value;
     const inTime = document.getElementById('f-in').value;
     const outTime = document.getElementById('f-out').value;
@@ -451,60 +592,89 @@ function openDetailEntry(){
       checkOut: firebase.firestore.Timestamp.fromDate(outD),
       needsReview: false, note:'הזנה ידנית'
     });
-    await loadAll(); renderPeriods(); toast('נשמר');
+    await loadAll(); renderEmployeeDetail(empId); toast('נשמר');
   };
 }
 
-function openPaymentForm(empId, periodStart){
+function openPaymentForm(empId, paymentId){
   const emp = state.employees.find(e=>e.id===empId);
-  const st = periodStatsForEmployee(empId, periodStart);
+  const life = employeeLifetimeStats(empId);
+  const existing = paymentId ? state.payments.find(p=>p.id===paymentId) : null;
   const today = toInputDate(new Date());
+  const existDate = existing ? (existing.date.toDate?existing.date.toDate():new Date(existing.date)) : null;
   root.innerHTML = `
     <div class="card">
-      <h2>רישום תשלום — ${emp.name}</h2>
-      <p class="muted">תקופה: ${fmtDateHe(periodStart)} – ${fmtDateHe(addDays(periodStart,6))}<br>נותר לתקופה זו: ${money(st.remaining)}</p>
+      <h2>${existing?'עריכת תשלום':'רישום תשלום'} — ${emp.name}</h2>
+      <p class="muted">חוב כולל כרגע: ${money(life.remaining)}</p>
       <label>סכום (€)</label>
-      <input id="f-amount" type="number" step="0.01" value="${st.remaining>0?st.remaining.toFixed(2):''}">
+      <input id="f-amount" type="number" step="0.01" value="${existing?existing.amount:(life.remaining>0?life.remaining.toFixed(2):'')}">
       <label>תאריך</label>
-      <input id="f-date" type="date" value="${today}">
-      <div class="row" style="margin-top:10px;">
+      <input id="f-date" type="date" value="${existing?toInputDate(existDate):today}">
+      ${!existing?`<div class="row" style="margin-top:10px;">
         <button class="btn btn-ghost btn-sm" id="btn-full">סמן כשולם במלואו</button>
-      </div>
+      </div>`:''}
       <div class="row" style="margin-top:16px;">
-        <button class="btn btn-primary" id="btn-save-pay">שמירה</button>
-        <button class="btn btn-ghost" id="btn-cancel-pay">ביטול</button>
+        <button class="btn btn-primary" id="btn-save">שמירה</button>
+        ${existing?'<button class="btn btn-danger" id="btn-del">מחיקה</button>':''}
+        <button class="btn btn-ghost" id="btn-cancel">ביטול</button>
       </div>
     </div>
   `;
-  document.getElementById('btn-full').onclick = ()=>{
-    document.getElementById('f-amount').value = st.remaining>0?st.remaining.toFixed(2):0;
-  };
-  document.getElementById('btn-cancel-pay').onclick = renderPeriods;
-  document.getElementById('btn-save-pay').onclick = async ()=>{
+  if(!existing){
+    document.getElementById('btn-full').onclick = ()=>{
+      document.getElementById('f-amount').value = life.remaining>0?life.remaining.toFixed(2):0;
+    };
+  } else {
+    document.getElementById('btn-del').onclick = async ()=>{
+      if(!confirm('למחוק תשלום זה?')) return;
+      await db.collection('payments').doc(existing.id).delete();
+      await loadAll(); renderEmployeeDetail(empId);
+    };
+  }
+  document.getElementById('btn-cancel').onclick = ()=>renderEmployeeDetail(empId);
+  document.getElementById('btn-save').onclick = async ()=>{
     const amount = parseFloat(document.getElementById('f-amount').value);
     const dateStr = document.getElementById('f-date').value;
     if(!amount || amount<=0 || !dateStr){ toast('נא למלא סכום ותאריך'); return; }
-    await db.collection('payments').add({
-      employeeId: empId,
-      amount,
-      date: firebase.firestore.Timestamp.fromDate(new Date(dateStr+'T12:00:00')),
-      periodKey: periodKeyOf(periodStart)
-    });
-    await loadAll(); renderPeriods(); toast('התשלום נשמר');
+    const payload = { employeeId: empId, amount, date: firebase.firestore.Timestamp.fromDate(new Date(dateStr+'T12:00:00')) };
+    if(existing){
+      await db.collection('payments').doc(existing.id).update(payload);
+    } else {
+      await db.collection('payments').add(payload);
+    }
+    await loadAll(); renderEmployeeDetail(empId); toast('נשמר');
   };
 }
 
 // ---------- reports ----------
 function renderReports(){
-  const periodStart = periodStartAtOffset(state.periodOffset);
-  const periodEnd = addDays(periodStart,6);
   const active = state.employees.filter(e=>e.active!==false);
+  let range, label;
+  if(state.reportMode==='week'){
+    const s = periodStartAtOffset(state.reportOffset);
+    range = {start:s, end:addDays(s,7)};
+    label = `${fmtDateHe(range.start)} – ${fmtDateHe(addDays(range.start,6))}`;
+  } else if(state.reportMode==='month'){
+    const s = addMonths(startOfMonth(new Date()), -state.reportOffset);
+    range = {start:s, end:addMonths(s,1)};
+    label = s.toLocaleDateString('he-IL',{month:'long',year:'numeric'});
+  } else {
+    const s = new Date(new Date().getFullYear()-state.reportOffset,0,1);
+    range = {start:s, end:new Date(s.getFullYear()+1,0,1)};
+    label = String(s.getFullYear());
+  }
+
   root.innerHTML = `
     <div class="card no-print">
+      <div class="row" style="margin-bottom:10px;">
+        <button class="tab ${state.reportMode==='week'?'active':''}" data-mode="week">שבועי</button>
+        <button class="tab ${state.reportMode==='month'?'active':''}" data-mode="month">חודשי</button>
+        <button class="tab ${state.reportMode==='year'?'active':''}" data-mode="year">שנתי</button>
+      </div>
       <div class="nav-period">
         <button id="btn-prev">›</button>
-        <div class="period-label"><b>${fmtDateHe(periodStart)} – ${fmtDateHe(periodEnd)}</b></div>
-        <button id="btn-next" ${state.periodOffset===0?'disabled style="opacity:.3"':''}>‹</button>
+        <div class="period-label"><b>${label}</b></div>
+        <button id="btn-next" ${state.reportOffset===0?'disabled style="opacity:.3"':''}>‹</button>
       </div>
       <div class="row" style="margin-top:12px;">
         <button class="btn btn-ghost btn-sm" id="btn-print">הדפסה</button>
@@ -512,29 +682,30 @@ function renderReports(){
       </div>
     </div>
     <div class="card">
-      <h2>דוח שכר — ${fmtDateHe(periodStart)} עד ${fmtDateHe(periodEnd)}</h2>
+      <h2>דוח שכר — ${label}</h2>
       <table>
-        <tr><th>עובד</th><th>שעות</th><th>הגיע לו</th><th>שולם</th><th>נותר</th></tr>
+        <tr><th>עובד</th><th>שעות</th><th>הגיע לו</th><th>שולם</th></tr>
         ${active.map(e=>{
-          const st = periodStatsForEmployee(e.id, periodStart);
-          return `<tr><td>${e.name}</td><td class="mono">${fmtHours(st.hours)}</td><td class="mono">${money(st.earned)}</td><td class="mono">${money(st.paid)}</td><td class="mono">${money(st.remaining)}</td></tr>`;
+          const st = statsForRange(e.id, range.start, range.end);
+          return `<tr><td>${e.name}</td><td class="mono">${fmtHours(st.hours)}</td><td class="mono">${money(st.earned)}</td><td class="mono">${money(st.paid)}</td></tr>`;
         }).join('')}
       </table>
     </div>
   `;
-  document.getElementById('btn-prev').onclick = ()=>{ state.periodOffset++; renderReports(); };
-  document.getElementById('btn-next').onclick = ()=>{ if(state.periodOffset>0){ state.periodOffset--; renderReports(); } };
+  root.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{ state.reportMode=b.dataset.mode; state.reportOffset=0; renderReports(); });
+  document.getElementById('btn-prev').onclick = ()=>{ state.reportOffset++; renderReports(); };
+  document.getElementById('btn-next').onclick = ()=>{ if(state.reportOffset>0){ state.reportOffset--; renderReports(); } };
   document.getElementById('btn-print').onclick = ()=>window.print();
   document.getElementById('btn-csv').onclick = ()=>{
-    let csv = 'עובד,שעות,הגיע לו,שולם,נותר\n';
+    let csv = 'עובד,שעות,הגיע לו,שולם\n';
     active.forEach(e=>{
-      const st = periodStatsForEmployee(e.id, periodStart);
-      csv += `${e.name},${fmtHours(st.hours)},${st.earned.toFixed(2)},${st.paid.toFixed(2)},${st.remaining.toFixed(2)}\n`;
+      const st = statsForRange(e.id, range.start, range.end);
+      csv += `${e.name},${fmtHours(st.hours)},${st.earned.toFixed(2)},${st.paid.toFixed(2)}\n`;
     });
     const blob = new Blob(['\uFEFF'+csv], {type:'text/csv;charset=utf-8;'});
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `דוח-שכר-${dateKey(periodStart)}.csv`;
+    a.download = `דוח-שכר-${state.reportMode}-${dateKey(range.start)}.csv`;
     a.click();
   };
 }
@@ -544,7 +715,7 @@ function renderQr(){
   root.innerHTML = `
     <div class="card center">
       <h2>קוד QR לכניסה</h2>
-      <p class="muted">מדפיסים ותולים בכניסה לעסק. כל הפקה של קוד חדש מבטלת אוטומטית את הקוד הישן.</p>
+      <p class="muted">מדפיסים ותולים בכניסה לעסק. הפקת קוד חדש מבטלת אוטומטית את הקוד הישן.</p>
       <div id="qr-canvas" style="display:flex;justify-content:center;margin:16px 0;"></div>
       <button class="btn btn-brass no-print" id="btn-new-qr">הפקת קוד חדש (מבטל את הישן)</button>
       <button class="btn btn-ghost no-print" style="margin-top:8px;" id="btn-print-qr">הדפסה</button>
@@ -572,7 +743,7 @@ function renderSettings(){
       <button class="btn btn-primary btn-sm" style="margin-top:10px;" id="btn-save-code">שמירה</button>
     </div>
     <div class="card">
-      <h2>יום תחילת תקופת שכר</h2>
+      <h2>יום תחילת שבוע שכר</h2>
       <select id="f-startday">
         ${['ראשון','שני','שלישי','רביעי','חמישי','שישי','שבת'].map((d,i)=>`<option value="${i}" ${i===state.config.periodStartDay?'selected':''}>${d}</option>`).join('')}
       </select>
