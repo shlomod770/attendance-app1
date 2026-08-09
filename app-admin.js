@@ -7,6 +7,7 @@ let state = {
   employees: [],
   shifts: [],
   payments: [],
+  notes: [],
   config: { qrToken:'', adminCode:'1234', periodStartDay:5 },
   periodOffset: 0,
   tab: 'dashboard',
@@ -59,15 +60,17 @@ function startOfYear(d){ return new Date(d.getFullYear(), 0, 1); }
 
 // ---------- data loading ----------
 async function loadAll(){
-  const [empSnap, shiftSnap, paySnap, cfgDoc] = await Promise.all([
+  const [empSnap, shiftSnap, paySnap, cfgDoc, notesSnap] = await Promise.all([
     db.collection('employees').get(),
     db.collection('shifts').get(),
     db.collection('payments').get(),
-    db.collection('config').doc('main').get()
+    db.collection('config').doc('main').get(),
+    db.collection('notes').get()
   ]);
   state.employees = empSnap.docs.map(d=>({id:d.id, ...d.data()}));
   state.shifts = shiftSnap.docs.map(d=>({id:d.id, ...d.data()}));
   state.payments = paySnap.docs.map(d=>({id:d.id, ...d.data()}));
+  state.notes = notesSnap.docs.map(d=>({id:d.id, ...d.data()}));
   if(cfgDoc.exists){
     state.config = { qrToken:'', adminCode:'1234', periodStartDay:5, ...cfgDoc.data() };
   } else {
@@ -79,6 +82,10 @@ function genToken(){ return 'shop-' + Math.random().toString(36).slice(2) + Date
 function displayName(e){
   if(!e) return '';
   return e.nameHe ? `${e.name} (${e.nameHe})` : e.name;
+}
+function locLink(loc, label){
+  if(!loc || loc.lat==null) return '';
+  return ` <a href="https://www.google.com/maps?q=${loc.lat},${loc.lng}" target="_blank" style="font-size:12px;">📍${label||'מיקום'}</a>`;
 }
 
 // ---------- shift helpers ----------
@@ -162,7 +169,7 @@ async function boot(){
   // the manager is in the middle of filling in).
   setInterval(async ()=>{
     if(localStorage.getItem(LS_ADMIN_OK) !== '1') return;
-    if(state.tab === 'dashboard' || state.tab === 'log'){
+    if(state.tab === 'dashboard' || state.tab === 'log' || state.tab === 'payments'){
       try{
         await loadAll();
         renderApp();
@@ -197,6 +204,7 @@ const TABS = [
   ['dashboard','דשבורד'],
   ['log','כניסות ויציאות'],
   ['employees','עובדים'],
+  ['payments','תשלומים'],
   ['reports','דוחות'],
   ['qr','QR'],
   ['settings','הגדרות']
@@ -214,6 +222,7 @@ function renderApp(){
     if(state.detailEmployeeId) renderEmployeeDetail(state.detailEmployeeId);
     else renderEmployees();
   }
+  else if(state.tab==='payments') renderPayments();
   else if(state.tab==='reports') renderReports();
   else if(state.tab==='qr') renderQr();
   else if(state.tab==='settings') renderSettings();
@@ -406,6 +415,11 @@ function renderEmployeeDetail(empId){
       <h3>כל התשלומים</h3>
       <div id="all-payments"></div>
     </div>
+
+    <div class="card">
+      <h3>הערות מהעובד</h3>
+      <div id="emp-notes"></div>
+    </div>
   `;
 
   document.getElementById('back-link').onclick = (e)=>{ e.preventDefault(); state.detailEmployeeId=null; renderApp(); };
@@ -461,6 +475,25 @@ function renderEmployeeDetail(empId){
       await loadAll(); renderEmployeeDetail(empId);
     });
   }
+
+  const notesCont = document.getElementById('emp-notes');
+  const empNotes = state.notes.filter(n=>n.employeeId===empId).sort((a,b)=>{
+    const da = a.createdAt && a.createdAt.toDate ? a.createdAt.toDate() : new Date(0);
+    const db_ = b.createdAt && b.createdAt.toDate ? b.createdAt.toDate() : new Date(0);
+    return db_-da;
+  });
+  if(!empNotes.length){
+    notesCont.innerHTML = '<p class="muted">אין הערות.</p>';
+  } else {
+    notesCont.innerHTML = empNotes.map(n=>{
+      const d = n.createdAt && n.createdAt.toDate ? n.createdAt.toDate() : null;
+      const when = d ? `${fmtDateHe(d)} · ${fmtTimeHe(d)}` : '—';
+      return `<div style="padding:8px 0;border-bottom:1px solid var(--line);">
+        <div class="muted" style="font-size:12px;">${when}${locLink(n.location,'מיקום ההערה')}</div>
+        <div style="margin-top:2px;">${n.text}</div>
+      </div>`;
+    }).join('');
+  }
 }
 
 function hasOpenShiftInWeek(empId, weekStart){
@@ -476,6 +509,8 @@ function shiftRowHtml(s){
     const inD = s.checkIn.toDate ? s.checkIn.toDate() : new Date(s.checkIn);
     const outD = s.checkOut ? (s.checkOut.toDate ? s.checkOut.toDate() : new Date(s.checkOut)) : null;
     desc = `${fmtDateHe(inD)} · ${fmtTimeHe(inD)} → ${outD?fmtTimeHe(outD):'פתוחה'} ${s.needsReview?'<span class="tag tag-review">דורש בדיקה</span>':''}`;
+    desc += locLink(s.checkInLoc, 'כניסה');
+    if(outD) desc += locLink(s.checkOutLoc, 'יציאה');
   }
   return `<div class="row between" style="padding:6px 0;border-bottom:1px solid var(--line);">
     <span style="font-size:13px;">${desc}</span>
@@ -824,7 +859,67 @@ function renderLog(){
   });
 }
 
-// ---------- reports ----------
+// ---------- global payments log ----------
+function paymentPeriodLabel(p){
+  if(!p.periodKey) return '—';
+  const s = new Date(p.periodKey + 'T00:00:00');
+  return `${fmtDateHe(s)} – ${fmtDateHe(addDays(s,6))}`;
+}
+function renderPayments(){
+  const sorted = [...state.payments].sort((a,b)=>{
+    const da = a.date && a.date.toDate ? a.date.toDate() : new Date(a.date||0);
+    const db_ = b.date && b.date.toDate ? b.date.toDate() : new Date(b.date||0);
+    return db_-da;
+  });
+
+  root.innerHTML = `
+    <div class="card no-print">
+      <h2>ריכוז תשלומים</h2>
+      <p class="muted">כל התשלומים שנרשמו אי-פעם, לפי תאריך תשלום בפועל.</p>
+      <button class="btn btn-ghost btn-sm" id="btn-refresh">רענון עכשיו</button>
+    </div>
+    <div id="pay-groups"></div>
+  `;
+  document.getElementById('btn-refresh').onclick = async ()=>{ await loadAll(); renderPayments(); toast('עודכן'); };
+
+  const cont = document.getElementById('pay-groups');
+  if(!sorted.length){
+    cont.innerHTML = '<div class="card"><p class="muted">אין עדיין תשלומים רשומים.</p></div>';
+    return;
+  }
+
+  // group by date (day)
+  const groups = [];
+  let currentKey = null, currentGroup = null;
+  sorted.forEach(p=>{
+    const d = p.date && p.date.toDate ? p.date.toDate() : new Date(p.date||0);
+    const key = dateKey(d);
+    if(key !== currentKey){
+      currentKey = key;
+      currentGroup = { date: d, items: [] };
+      groups.push(currentGroup);
+    }
+    currentGroup.items.push(p);
+  });
+
+  cont.innerHTML = groups.map(g=>{
+    const dayTotal = g.items.reduce((s,p)=>s+(p.amount||0),0);
+    return `<div class="card">
+      <div class="row between"><h3>${fmtDateHe(g.date)}</h3><span class="mono">${money(dayTotal)}</span></div>
+      <div class="divider"></div>
+      ${g.items.map(p=>{
+        const emp = state.employees.find(e=>e.id===p.employeeId);
+        return `<div class="row between" style="padding:6px 0;border-bottom:1px solid var(--line);">
+          <div>
+            <div>${emp?displayName(emp):'(עובד לא ידוע)'}</div>
+            <div class="muted" style="font-size:12px;">עבור שבוע: ${paymentPeriodLabel(p)}</div>
+          </div>
+          <b class="mono">${money(p.amount)}</b>
+        </div>`;
+      }).join('')}
+    </div>`;
+  }).join('');
+}
 function renderReports(){
   const active = state.employees.filter(e=>e.active!==false);
 
