@@ -471,11 +471,15 @@ function openEditShift(shiftId, empId){
   const s = state.shifts.find(x=>x.id===shiftId);
   if(!s) return;
   if(s.manualTotalHours != null){
+    const hh = Math.floor(s.manualTotalHours);
+    const mm = Math.round((s.manualTotalHours - hh) * 60);
     root.innerHTML = `
       <div class="card">
         <h2>עריכת הזנה כוללת</h2>
-        <label>סך השעות</label>
-        <input id="f-hours" type="number" step="0.25" value="${s.manualTotalHours}">
+        <div class="row">
+          <div style="flex:1;"><label>שעות</label><input id="f-h" type="number" step="1" min="0" value="${hh}"></div>
+          <div style="flex:1;"><label>דקות</label><input id="f-m" type="number" step="1" min="0" max="59" value="${mm}"></div>
+        </div>
         <div class="row" style="margin-top:16px;">
           <button class="btn btn-primary" id="btn-save">שמירה</button>
           <button class="btn btn-danger" id="btn-del">מחיקה</button>
@@ -485,8 +489,10 @@ function openEditShift(shiftId, empId){
     `;
     document.getElementById('btn-cancel').onclick = ()=>renderEmployeeDetail(empId);
     document.getElementById('btn-save').onclick = async ()=>{
-      const hours = parseFloat(document.getElementById('f-hours').value);
-      if(!hours || hours<=0){ toast('נא להזין שעות'); return; }
+      const h = parseFloat(document.getElementById('f-h').value) || 0;
+      const m = parseFloat(document.getElementById('f-m').value) || 0;
+      const hours = h + (m/60);
+      if(hours<=0){ toast('נא להזין שעות ו/או דקות'); return; }
       await db.collection('shifts').doc(shiftId).update({manualTotalHours: hours});
       await loadAll(); renderEmployeeDetail(empId); toast('נשמר');
     };
@@ -557,8 +563,17 @@ function openQuickEntry(empId, weekStart){
     <div class="card">
       <h2>הזנה מהירה — סך שעות</h2>
       <p class="muted">שבוע: ${fmtDateHe(weekStart)} – ${fmtDateHe(addDays(weekStart,6))}</p>
-      <label>סך השעות בשבוע זה</label>
-      <input id="f-hours" type="number" step="0.25" placeholder="לדוגמה 38.5">
+      <div class="row">
+        <div style="flex:1;">
+          <label>שעות</label>
+          <input id="f-h" type="number" step="1" min="0" placeholder="0">
+        </div>
+        <div style="flex:1;">
+          <label>דקות</label>
+          <input id="f-m" type="number" step="1" min="0" max="59" placeholder="0">
+        </div>
+      </div>
+      <p class="muted">לדוגמה: 3 שעות ו-30 דקות — יש להזין 3 בשדה שעות ו-30 בשדה דקות.</p>
       <div class="row" style="margin-top:16px;">
         <button class="btn btn-primary" id="btn-save">שמירה</button>
         <button class="btn btn-ghost" id="btn-cancel">ביטול</button>
@@ -567,8 +582,10 @@ function openQuickEntry(empId, weekStart){
   `;
   document.getElementById('btn-cancel').onclick = ()=>renderEmployeeDetail(empId);
   document.getElementById('btn-save').onclick = async ()=>{
-    const hours = parseFloat(document.getElementById('f-hours').value);
-    if(!hours || hours<=0){ toast('נא להזין מספר שעות'); return; }
+    const h = parseFloat(document.getElementById('f-h').value) || 0;
+    const m = parseFloat(document.getElementById('f-m').value) || 0;
+    const hours = h + (m/60);
+    if(hours <= 0){ toast('נא להזין שעות ו/או דקות'); return; }
     await db.collection('shifts').add({
       employeeId: empId, manualTotalHours: hours, periodKey: periodKeyOf(weekStart),
       checkIn: null, checkOut: null, needsReview:false, note:'הזנה מהירה'
