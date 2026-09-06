@@ -11,6 +11,11 @@ function getDeviceId(){
   return id;
 }
 
+async function sha256(str){
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+
 function toast(msg){
   const t = document.createElement('div');
   t.className = 'toast';
@@ -88,7 +93,19 @@ async function doLogin(){
   const doc = snap.docs[0];
   const data = doc.data();
   if(data.active === false){ errEl.textContent = 'Профилът е деактивиран. Обърнете се към управителя.'; return; }
-  if(String(data.pin) !== String(pin)){ errEl.textContent = 'Грешно потребителско име или код.'; return; }
+
+  let pinOk = false;
+  if(data.pinHash){
+    pinOk = (await sha256(pin)) === data.pinHash;
+  } else if(data.pin != null){
+    // legacy plaintext PIN — accept once, then upgrade it to a hash so it's never stored in the open again
+    pinOk = String(data.pin) === String(pin);
+    if(pinOk){
+      const hash = await sha256(pin);
+      await db.collection('employees').doc(doc.id).update({ pinHash: hash, pin: firebase.firestore.FieldValue.delete() });
+    }
+  }
+  if(!pinOk){ errEl.textContent = 'Грешно потребителско име или код.'; return; }
 
   const deviceId = getDeviceId();
   if(data.deviceId && data.deviceId !== deviceId){
@@ -228,7 +245,7 @@ async function processScan(){
     if(openDocs.length === 0){
       await db.collection('shifts').add({
         employeeId: currentEmployee.id,
-        checkIn: firebase.firestore.Timestamp.fromDate(now),
+        checkIn: firebase.firestore.FieldValue.serverTimestamp(),
         checkInLoc: loc,
         checkOut: null,
         needsReview: false,
@@ -247,7 +264,7 @@ async function processScan(){
       await db.collection('shifts').doc(openDoc.id).update({ needsReview: true });
       await db.collection('shifts').add({
         employeeId: currentEmployee.id,
-        checkIn: firebase.firestore.Timestamp.fromDate(now),
+        checkIn: firebase.firestore.FieldValue.serverTimestamp(),
         checkInLoc: loc,
         checkOut: null,
         needsReview: false,
@@ -258,7 +275,7 @@ async function processScan(){
     }
 
     await db.collection('shifts').doc(openDoc.id).update({
-      checkOut: firebase.firestore.Timestamp.fromDate(now),
+      checkOut: firebase.firestore.FieldValue.serverTimestamp(),
       checkOutLoc: loc
     });
     const durationH = hoursSince;
