@@ -27,6 +27,11 @@ function toast(msg){
   setTimeout(()=>t.remove(), 2600);
 }
 
+async function sha256(str){
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+
 // ---------- date helpers ----------
 function addDays(d, n){ const r = new Date(d); r.setDate(r.getDate()+n); return r; }
 function addMonths(d, n){ const r = new Date(d); r.setMonth(r.getMonth()+n); return r; }
@@ -72,9 +77,9 @@ async function loadAll(){
   state.payments = paySnap.docs.map(d=>({id:d.id, ...d.data()}));
   state.notes = notesSnap.docs.map(d=>({id:d.id, ...d.data()}));
   if(cfgDoc.exists){
-    state.config = { qrToken:'', adminCode:'1234', periodStartDay:5, businessRadius:150, ...cfgDoc.data() };
+    state.config = { qrToken:'', periodStartDay:5, businessRadius:150, ...cfgDoc.data() };
   } else {
-    state.config = { qrToken: genToken(), adminCode:'1234', periodStartDay:5, businessRadius:150 };
+    state.config = { qrToken: genToken(), adminCodeHash: await sha256('1234'), periodStartDay:5, businessRadius:150 };
     await db.collection('config').doc('main').set(state.config);
   }
 }
@@ -159,7 +164,7 @@ function employeeLifetimeStats(empId){
   const hours = state.shifts
     .filter(s=>s.employeeId===empId && isCountable(s))
     .reduce((sum,s)=>sum+shiftDurationHours(s), 0);
-  const paid = state.payments.filter(p=>p.employeeId===empId).reduce((s,p)=>s+(p.amount||0),0);
+  const paid = state.payments.filter(p=>p.employeeId===empId && !p.isTip).reduce((s,p)=>s+(p.amount||0),0);
   const earned = hours*rate;
   return { hours, earned, paid, remaining: earned-paid };
 }
@@ -174,7 +179,7 @@ function statsForRange(empId, startDate, endDateExcl){
   });
   const hours = shifts.reduce((s,sh)=>s+shiftDurationHours(sh),0);
   const pays = state.payments.filter(p=>{
-    if(p.employeeId !== empId) return false;
+    if(p.employeeId !== empId || p.isTip) return false;
     const d = paymentEffectiveDate(p);
     return d && d >= startDate && d < endDateExcl;
   });
@@ -234,9 +239,21 @@ function renderGate(){
       <p class="muted" id="gate-err" style="margin-top:8px;"></p>
     </div>
   `;
-  document.getElementById('btn-enter').onclick = ()=>{
+  document.getElementById('btn-enter').onclick = async ()=>{
     const v = document.getElementById('f-code').value.trim();
-    if(v === String(state.config.adminCode)){
+    let ok = false;
+    if(state.config.adminCodeHash){
+      ok = (await sha256(v)) === state.config.adminCodeHash;
+    } else if(state.config.adminCode != null){
+      ok = v === String(state.config.adminCode);
+      if(ok){
+        const hash = await sha256(v);
+        await db.collection('config').doc('main').update({ adminCodeHash: hash, adminCode: firebase.firestore.FieldValue.delete() });
+        state.config.adminCodeHash = hash;
+        delete state.config.adminCode;
+      }
+    }
+    if(ok){
       localStorage.setItem(LS_ADMIN_OK,'1');
       renderApp();
     } else {
@@ -248,6 +265,7 @@ function renderGate(){
 // ---------- app shell ----------
 const TABS = [
   ['dashboard','דשבורד'],
+  ['payroll','סגירת שבוע'],
   ['log','כניסות ויציאות'],
   ['exceptions','חריגים'],
   ['employees','עובדים'],
@@ -264,6 +282,7 @@ function renderApp(){
     btn.onclick = ()=>{ state.tab = btn.dataset.tab; state.detailEmployeeId=null; renderApp(); };
   });
   if(state.tab==='dashboard') renderDashboard();
+  else if(state.tab==='payroll') renderPayroll();
   else if(state.tab==='log') renderLog();
   else if(state.tab==='employees'){
     if(state.detailEmployeeId) renderEmployeeDetail(state.detailEmployeeId);
@@ -279,14 +298,20 @@ function renderApp(){
 // ---------- dashboard ----------
 function renderDashboard(){
   const active = state.employees.filter(e=>e.active!==false);
-  const wStart = currentPeriodStart(), wEnd = addDays(wStart,6);
+  // "Last completed week" is always one full period before the in-progress one —
+  // this is what you actually owe people right now, regardless of what day you check.
+  const lastWeekStart = periodStartAtOffset(1);
+  const lastWeekEnd = addDays(lastWeekStart,7);
+  const upcomingStart = periodStartAtOffset(0);
+  const upcomingEnd = addDays(upcomingStart,7);
   const mStart = startOfMonth(new Date()), mEnd = addMonths(mStart,1);
 
-  let wEarn=0,wPaid=0,mEarn=0,mPaid=0,totalOwed=0;
+  let lastEarn=0,lastPaid=0,upEarn=0,mEarn=0,mPaid=0,totalOwed=0;
   active.forEach(e=>{
-    const w = statsForRange(e.id, wStart, addDays(wStart,7));
+    const lw = statsForRange(e.id, lastWeekStart, lastWeekEnd);
+    const uw = statsForRange(e.id, upcomingStart, upcomingEnd);
     const m = statsForRange(e.id, mStart, mEnd);
-    wEarn+=w.earned; wPaid+=w.paid; mEarn+=m.earned; mPaid+=m.paid;
+    lastEarn+=lw.earned; lastPaid+=lw.paid; upEarn+=uw.earned; mEarn+=m.earned; mPaid+=m.paid;
     totalOwed += employeeLifetimeStats(e.id).remaining;
   });
   const alerts = active.filter(e=>hasOpenShift(e.id) || hasReviewShift(e.id));
@@ -297,10 +322,16 @@ function renderDashboard(){
       <p class="muted">סה"כ חוב כולל לכל העובדים כרגע</p>
       <div class="big-num">${money(totalOwed)}</div>
     </div>
+    <div class="card" style="cursor:pointer;" id="goto-payroll">
+      <div class="row between"><h3>השבוע האחרון (לתשלום עכשיו)</h3><span class="muted">${fmtDateHe(lastWeekStart)} - ${fmtDateHe(addDays(lastWeekStart,6))}</span></div>
+      <div class="row between"><span>הגיע לעובדים</span><b class="mono">${money(lastEarn)}</b></div>
+      <div class="row between"><span>שולם</span><b class="mono">${money(lastPaid)}</b></div>
+      <div class="row between"><b>נותר לשלם עבור השבוע הזה</b><b class="mono">${money(lastEarn-lastPaid)}</b></div>
+      <p class="muted" style="margin-top:6px;font-size:12px;">לחצו כדי לעבור למסך "סגירת שבוע" ולשלם לכולם</p>
+    </div>
     <div class="card">
-      <div class="row between"><h3>השבוע</h3><span class="muted">${fmtDateHe(wStart)} - ${fmtDateHe(wEnd)}</span></div>
-      <div class="row between"><span>הגיע לעובדים</span><b class="mono">${money(wEarn)}</b></div>
-      <div class="row between"><span>שולם</span><b class="mono">${money(wPaid)}</b></div>
+      <div class="row between"><h3>השבוע הקרוב (מתקדם)</h3><span class="muted">${fmtDateHe(upcomingStart)} - ${fmtDateHe(addDays(upcomingStart,6))}</span></div>
+      <div class="row between"><span>צפוי עד כה</span><b class="mono">${money(upEarn)}</b></div>
     </div>
     <div class="card">
       <div class="row between"><h3>החודש</h3><span class="muted">${mStart.toLocaleDateString('he-IL',{month:'long',year:'numeric'})}</span></div>
@@ -328,10 +359,99 @@ function renderDashboard(){
         </div>`).join('')}
     </div>` : ''}
   `;
+  document.getElementById('goto-payroll').onclick = ()=>{ state.tab='payroll'; renderApp(); };
   document.getElementById('goto-exceptions').onclick = ()=>{ state.tab='exceptions'; renderApp(); };
   root.querySelectorAll('[data-goto]').forEach(el=>el.onclick=()=>{
     state.tab='employees'; state.detailEmployeeId = el.dataset.goto; renderApp();
   });
+}
+
+// ---------- quick payroll (close the week) ----------
+function renderPayroll(){
+  if(state.payrollOffset === undefined) state.payrollOffset = 1; // default: last completed week
+  const weekStart = periodStartAtOffset(state.payrollOffset);
+  const weekEnd = addDays(weekStart,7);
+  const active = state.employees.filter(e=>e.active!==false);
+
+  const rows = active.map(e=>{
+    const st = statsForRange(e.id, weekStart, weekEnd);
+    const remaining = Math.max(0, st.earned - st.paid);
+    return { emp:e, ...st, remaining };
+  });
+  const totalRemaining = rows.reduce((s,r)=>s+r.remaining,0);
+
+  root.innerHTML = `
+    <div class="card no-print">
+      <h2>סגירת שבוע</h2>
+      <div class="nav-period">
+        <button id="btn-prev">›</button>
+        <div class="period-label">
+          <b>${fmtDateHe(weekStart)} – ${fmtDateHe(addDays(weekStart,6))}</b><br>
+          <span class="muted">${state.payrollOffset===0?'השבוע הנוכחי (בעיצומו)':state.payrollOffset===1?'השבוע האחרון שהסתיים':state.payrollOffset+' שבועות אחורה'}</span>
+        </div>
+        <button id="btn-next" ${state.payrollOffset===0?'disabled style="opacity:.3"':''}>‹</button>
+      </div>
+    </div>
+    <div class="card">
+      <p class="muted">סה"כ נותר לשלם לכולם עבור השבוע הזה</p>
+      <div class="big-num">${money(totalRemaining)}</div>
+      <button class="btn btn-brass" id="btn-pay-all" style="margin-top:10px;">שלם לכולם את הסכום המלא</button>
+    </div>
+    <div id="payroll-rows"></div>
+  `;
+  document.getElementById('btn-prev').onclick = ()=>{ state.payrollOffset++; renderPayroll(); };
+  document.getElementById('btn-next').onclick = ()=>{ if(state.payrollOffset>0){ state.payrollOffset--; renderPayroll(); } };
+
+  const cont = document.getElementById('payroll-rows');
+  cont.innerHTML = rows.map(r=>`
+    <div class="card">
+      <div class="row between"><b>${displayName(r.emp)}</b><span class="mono">${fmtHours(r.hours)} ש'</span></div>
+      <div class="row between muted"><span>הגיע (${money(r.emp.hourlyRate)}/שעה)</span><span class="mono">${money(r.earned)}</span></div>
+      <div class="row between muted"><span>כבר שולם השבוע</span><span class="mono">${money(r.paid)}</span></div>
+      <div class="row between" style="margin-top:6px;">
+        <label style="margin:0;">סכום לתשלום עכשיו</label>
+        <input data-amt="${r.emp.id}" type="number" step="0.01" value="${r.remaining>0?r.remaining.toFixed(2):0}" style="width:110px;text-align:left;">
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <button class="btn btn-primary btn-sm" data-pay="${r.emp.id}">שלם סכום זה</button>
+        <button class="btn btn-ghost btn-sm" data-open="${r.emp.id}">פתח כרטיס עובד</button>
+      </div>
+    </div>
+  `).join('');
+
+  cont.querySelectorAll('[data-pay]').forEach(b=>b.onclick=async()=>{
+    const empId = b.dataset.pay;
+    const amt = parseFloat(document.querySelector(`[data-amt="${empId}"]`).value) || 0;
+    if(amt <= 0){ toast('נא להזין סכום'); return; }
+    await db.collection('payments').add({
+      employeeId: empId, amount: amt,
+      date: firebase.firestore.Timestamp.fromDate(new Date()),
+      periodKey: periodKeyOf(weekStart)
+    });
+    await loadAll(); renderPayroll(); toast('התשלום נשמר');
+  });
+  cont.querySelectorAll('[data-open]').forEach(b=>b.onclick=()=>{
+    state.tab='employees'; state.detailEmployeeId = b.dataset.open; state.periodOffset = state.payrollOffset; renderApp();
+  });
+
+  document.getElementById('btn-pay-all').onclick = async ()=>{
+    const toPay = rows.filter(r=>{
+      const v = parseFloat(document.querySelector(`[data-amt="${r.emp.id}"]`).value) || 0;
+      return v > 0;
+    });
+    if(!toPay.length){ toast('אין למי לשלם'); return; }
+    if(!confirm(`לשלם ל-${toPay.length} עובדים, סה"כ ${money(totalRemaining)}?`)) return;
+    for(const r of toPay){
+      const v = parseFloat(document.querySelector(`[data-amt="${r.emp.id}"]`).value) || 0;
+      if(v<=0) continue;
+      await db.collection('payments').add({
+        employeeId: r.emp.id, amount: v,
+        date: firebase.firestore.Timestamp.fromDate(new Date()),
+        periodKey: periodKeyOf(weekStart)
+      });
+    }
+    await loadAll(); renderPayroll(); toast('כל התשלומים נשמרו');
+  };
 }
 
 // ---------- employees list ----------
@@ -377,7 +497,7 @@ function openEmployeeForm(empId){
       <label>שם (כפי שנרשם/מוצג לעובד — בולגרית/אנגלית וכו')</label><input id="f-name" value="${emp?emp.name:''}">
       <label>שם בעברית (לשימוש שלך בלבד, לא מוצג לעובד)</label><input id="f-namehe" value="${emp?(emp.nameHe||''):''}">
       <label>שם משתמש (לכניסה)</label><input id="f-username" value="${emp?emp.username:''}">
-      <label>קוד אישי</label><input id="f-pin" value="${emp?emp.pin:''}">
+      <label>קוד אישי${emp?' (השאירו ריק כדי לא לשנות)':''}</label><input id="f-pin" placeholder="${emp?'••••':''}">
       <label>שכר לשעה (€)</label><input id="f-rate" type="number" step="0.01" value="${emp?emp.hourlyRate:''}">
       <div class="row" style="margin-top:16px;">
         <button class="btn btn-primary" id="btn-save-emp">שמירה</button>
@@ -389,20 +509,25 @@ function openEmployeeForm(empId){
     if(emp) renderEmployeeDetail(emp.id); else renderEmployees();
   };
   document.getElementById('btn-save-emp').onclick = async ()=>{
+    const newPin = document.getElementById('f-pin').value.trim();
     const data = {
       name: document.getElementById('f-name').value.trim(),
       nameHe: document.getElementById('f-namehe').value.trim(),
       username: document.getElementById('f-username').value.trim(),
-      pin: document.getElementById('f-pin').value.trim(),
       hourlyRate: parseFloat(document.getElementById('f-rate').value) || 0,
       active: emp ? (emp.active!==false) : true
     };
-    if(!data.name || !data.username || !data.pin){ toast('נא למלא את כל השדות'); return; }
+    if(!data.name || !data.username || (!emp && !newPin)){ toast('נא למלא את כל השדות'); return; }
+    if(newPin){
+      data.pinHash = await sha256(newPin);
+      data.pin = firebase.firestore.FieldValue.delete();
+    }
     let id = empId;
     if(emp){
       await db.collection('employees').doc(emp.id).update(data);
     } else {
       data.deviceId = null;
+      delete data.pin; // brand new doc — nothing to delete
       const ref = await db.collection('employees').add(data);
       id = ref.id;
     }
@@ -464,6 +589,7 @@ function renderEmployeeDetail(empId){
       <div class="row" style="margin-top:10px;">
         <button class="btn btn-ghost btn-sm" id="btn-quick">הזנה מהירה (סך שעות)</button>
         <button class="btn btn-ghost btn-sm" id="btn-detail">הזנת משמרת מדויקת</button>
+        <button class="btn btn-ghost btn-sm" id="btn-slip">הפק פירוט שבועי לעובד</button>
       </div>
     </div>
 
@@ -494,6 +620,7 @@ function renderEmployeeDetail(empId){
   document.getElementById('btn-next-w').onclick = ()=>{ if(state.periodOffset>0){ state.periodOffset--; renderEmployeeDetail(empId); } };
   document.getElementById('btn-quick').onclick = ()=>openQuickEntry(empId);
   document.getElementById('btn-detail').onclick = ()=>openDetailEntry(empId);
+  document.getElementById('btn-slip').onclick = ()=>renderEmployeeSlip(empId, state.periodOffset);
 
   const wsCont = document.getElementById('week-shifts');
   if(!w.shifts.length && !hasOpenShiftInWeek(empId, w.start)){
@@ -516,7 +643,7 @@ function renderEmployeeDetail(empId){
     payCont.innerHTML = emPays.map(p=>{
       const d = p.date && p.date.toDate ? p.date.toDate() : new Date(p.date);
       return `<div class="row between" style="padding:6px 0;border-bottom:1px solid var(--line);">
-        <span>${fmtDateHe(d)}</span>
+        <span>${fmtDateHe(d)} ${p.isTip?'<span class="tag tag-open">טיפ</span>':''}</span>
         <span class="mono">${money(p.amount)}</span>
         <span>
           <button class="btn btn-ghost btn-sm" data-edit-pay="${p.id}">עריכה</button>
@@ -550,6 +677,58 @@ function renderEmployeeDetail(empId){
       </div>`;
     }).join('');
   }
+}
+
+// Printable weekly slip for an employee, in Bulgarian, so they can check their own hours/pay.
+function renderEmployeeSlip(empId, offset){
+  const emp = state.employees.find(e=>e.id===empId);
+  const weekStart = periodStartAtOffset(offset);
+  const weekEnd = addDays(weekStart,7);
+  const st = statsForRange(empId, weekStart, weekEnd);
+  const shifts = [...st.shifts].sort((a,b)=>{
+    const da = shiftEffectiveDate(a) || new Date(0);
+    const db_ = shiftEffectiveDate(b) || new Date(0);
+    return da - db_;
+  });
+
+  root.innerHTML = `
+    <div class="card no-print">
+      <button class="btn btn-ghost btn-sm" id="btn-back">← חזרה</button>
+      <button class="btn btn-brass btn-sm" id="btn-print" style="margin-right:8px;">הדפסה / שמירה כ-PDF</button>
+    </div>
+    <div class="card" dir="ltr" style="text-align:left;">
+      <h2 style="font-family:'Heebo',sans-serif;">Седмичен отчет за работа</h2>
+      <p class="muted">Employee weekly work report</p>
+      <div class="divider"></div>
+      <p><b>Име / Name:</b> ${emp.name}</p>
+      <p><b>Седмица / Week:</b> ${toInputDate(weekStart)} – ${toInputDate(addDays(weekStart,6))}</p>
+      <div class="divider"></div>
+      <table style="width:100%;">
+        <tr><th style="text-align:left;">Дата / Date</th><th style="text-align:left;">Вход / In</th><th style="text-align:left;">Изход / Out</th><th style="text-align:left;">Часове / Hours</th></tr>
+        ${shifts.map(s=>{
+          if(s.manualTotalHours!=null){
+            return `<tr><td colspan="3">Ръчно въведено / Manual entry</td><td class="mono">${fmtHours(s.manualTotalHours)}</td></tr>`;
+          }
+          const inD = s.checkIn.toDate?s.checkIn.toDate():new Date(s.checkIn);
+          const outD = s.checkOut ? (s.checkOut.toDate?s.checkOut.toDate():new Date(s.checkOut)) : null;
+          return `<tr>
+            <td>${toInputDate(inD)}</td>
+            <td>${toInputTime(inD)}</td>
+            <td>${outD?toInputTime(outD):'—'}</td>
+            <td class="mono">${fmtHours(shiftDurationHours(s))}</td>
+          </tr>`;
+        }).join('')}
+      </table>
+      <div class="divider"></div>
+      <div class="row between"><span>Общо часове / Total hours</span><b class="mono">${fmtHours(st.hours)}</b></div>
+      <div class="row between"><span>Ставка / Rate</span><b class="mono">${money(emp.hourlyRate)}/ч.</b></div>
+      <div class="row between"><span>Общо заработено / Total earned</span><b class="mono">${money(st.earned)}</b></div>
+      <div class="row between"><span>Платено тази седмица / Paid this week</span><b class="mono">${money(st.paid)}</b></div>
+      <div class="row between"><b>Остатък / Remaining</b><b class="mono">${money(st.earned-st.paid)}</b></div>
+    </div>
+  `;
+  document.getElementById('btn-back').onclick = ()=>renderEmployeeDetail(empId);
+  document.getElementById('btn-print').onclick = ()=>window.print();
 }
 
 function hasOpenShiftInWeek(empId, weekStart){
@@ -784,14 +963,20 @@ function openPaymentForm(empId, paymentId, isNav){
       <input id="f-amount" type="number" step="0.01" value="${existing?existing.amount:(life.remaining>0?life.remaining.toFixed(2):'')}">
       <label>תאריך שבו שולם בפועל</label>
       <input id="f-date" type="date" value="${existing?toInputDate(existDate):today}">
-      <label>עבור איזה שבוע התשלום הזה</label>
-      <div class="nav-period">
-        <button id="btn-prev-w">›</button>
-        <div class="period-label">
-          <b>${fmtDateHe(weekStart)} – ${fmtDateHe(addDays(weekStart,6))}</b><br>
-          <span class="muted">${state.periodOffset===0?'השבוע הנוכחי':state.periodOffset+' שבועות אחורה'}</span>
+      <div class="row" style="margin-top:10px;align-items:center;">
+        <input type="checkbox" id="f-tip" style="width:auto;" ${existing&&existing.isTip?'checked':''}>
+        <label style="margin:0;" for="f-tip">זה טיפ / מתנה (לא ייכנס לחישוב החוב, לא מחשב שעות)</label>
+      </div>
+      <div id="week-section">
+        <label>עבור איזה שבוע התשלום הזה</label>
+        <div class="nav-period">
+          <button id="btn-prev-w">›</button>
+          <div class="period-label">
+            <b>${fmtDateHe(weekStart)} – ${fmtDateHe(addDays(weekStart,6))}</b><br>
+            <span class="muted">${state.periodOffset===0?'השבוע הנוכחי':state.periodOffset+' שבועות אחורה'}</span>
+          </div>
+          <button id="btn-next-w" ${state.periodOffset===0?'disabled style="opacity:.3"':''}>‹</button>
         </div>
-        <button id="btn-next-w" ${state.periodOffset===0?'disabled style="opacity:.3"':''}>‹</button>
       </div>
       ${!existing?`<div class="row" style="margin-top:10px;">
         <button class="btn btn-ghost btn-sm" id="btn-full">סמן כשולם במלואו</button>
@@ -803,6 +988,11 @@ function openPaymentForm(empId, paymentId, isNav){
       </div>
     </div>
   `;
+  const tipBox = document.getElementById('f-tip');
+  const weekSection = document.getElementById('week-section');
+  const syncTipUi = ()=>{ weekSection.style.display = tipBox.checked ? 'none' : ''; };
+  tipBox.onchange = syncTipUi;
+  syncTipUi();
   document.getElementById('btn-prev-w').onclick = ()=>{ state.periodOffset++; openPaymentForm(empId, paymentId, true); };
   document.getElementById('btn-next-w').onclick = ()=>{ if(state.periodOffset>0){ state.periodOffset--; openPaymentForm(empId, paymentId, true); } };
   if(!existing){
@@ -820,20 +1010,27 @@ function openPaymentForm(empId, paymentId, isNav){
   document.getElementById('btn-save').onclick = async ()=>{
     const amount = parseFloat(document.getElementById('f-amount').value);
     const dateStr = document.getElementById('f-date').value;
+    const isTip = document.getElementById('f-tip').checked;
     if(!amount || amount<=0 || !dateStr){ toast('נא למלא סכום ותאריך'); return; }
     const targetWeek = periodStartAtOffset(state.periodOffset);
     const payload = {
       employeeId: empId,
       amount,
       date: firebase.firestore.Timestamp.fromDate(new Date(dateStr+'T12:00:00')),
-      periodKey: periodKeyOf(targetWeek)
+      isTip
     };
+    if(isTip){
+      payload.periodKey = firebase.firestore.FieldValue.delete();
+    } else {
+      payload.periodKey = periodKeyOf(targetWeek);
+    }
     if(existing){
       await db.collection('payments').doc(existing.id).update(payload);
     } else {
+      if(isTip) delete payload.periodKey; // brand new doc — nothing to delete, just omit
       await db.collection('payments').add(payload);
     }
-    await loadAll(); renderEmployeeDetail(empId); toast('נשמר');
+    await loadAll(); renderEmployeeDetail(empId); toast(isTip ? 'הטיפ נשמר' : 'נשמר');
   };
 }
 
@@ -990,9 +1187,10 @@ function renderExceptions(){
 
 // ---------- global payments log ----------
 function paymentPeriodLabel(p){
+  if(p.isTip) return 'טיפ / מתנה';
   if(!p.periodKey) return '—';
   const s = new Date(p.periodKey + 'T00:00:00');
-  return `${fmtDateHe(s)} – ${fmtDateHe(addDays(s,6))}`;
+  return `עבור שבוע: ${fmtDateHe(s)} – ${fmtDateHe(addDays(s,6))}`;
 }
 function renderPayments(){
   const sorted = [...state.payments].sort((a,b)=>{
@@ -1040,8 +1238,8 @@ function renderPayments(){
         const emp = state.employees.find(e=>e.id===p.employeeId);
         return `<div class="row between" style="padding:6px 0;border-bottom:1px solid var(--line);">
           <div>
-            <div>${emp?displayName(emp):'(עובד לא ידוע)'}</div>
-            <div class="muted" style="font-size:12px;">עבור שבוע: ${paymentPeriodLabel(p)}</div>
+            <div>${emp?displayName(emp):'(עובד לא ידוע)'} ${p.isTip?'<span class="tag tag-open">טיפ</span>':''}</div>
+            <div class="muted" style="font-size:12px;">${paymentPeriodLabel(p)}</div>
           </div>
           <b class="mono">${money(p.amount)}</b>
         </div>`;
@@ -1238,7 +1436,7 @@ function renderSettings(){
     <div class="card">
       <h2>שינוי קוד גישה</h2>
       <label>קוד גישה חדש</label>
-      <input id="f-newcode" value="${state.config.adminCode}">
+      <input id="f-newcode" placeholder="הזינו קוד חדש כדי לשנות" type="password">
       <button class="btn btn-primary btn-sm" style="margin-top:10px;" id="btn-save-code">שמירה</button>
     </div>
     <div class="card">
@@ -1270,9 +1468,12 @@ function renderSettings(){
   `;
   document.getElementById('btn-save-code').onclick = async ()=>{
     const v = document.getElementById('f-newcode').value.trim();
-    if(!v){ toast('נא להזין קוד'); return; }
-    await db.collection('config').doc('main').update({adminCode:v});
-    state.config.adminCode = v;
+    if(!v){ toast('נא להזין קוד חדש'); return; }
+    const hash = await sha256(v);
+    await db.collection('config').doc('main').update({adminCodeHash:hash, adminCode: firebase.firestore.FieldValue.delete()});
+    state.config.adminCodeHash = hash;
+    delete state.config.adminCode;
+    document.getElementById('f-newcode').value='';
     toast('הקוד עודכן');
   };
   document.getElementById('btn-save-day').onclick = async ()=>{
