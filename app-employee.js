@@ -249,7 +249,8 @@ async function processScan(){
         checkInLoc: loc,
         checkOut: null,
         needsReview: false,
-        note: ''
+        note: '',
+        source: 'qr'
       });
       showResult(true, `Час: ${fmtTime(now)}`);
       return;
@@ -268,7 +269,8 @@ async function processScan(){
         checkInLoc: loc,
         checkOut: null,
         needsReview: false,
-        note: ''
+        note: '',
+        source: 'qr'
       });
       showResult(true, `Час: ${fmtTime(now)}`);
       return;
