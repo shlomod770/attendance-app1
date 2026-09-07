@@ -516,11 +516,14 @@ function renderEmployees(){
     card.className = 'card';
     card.innerHTML = `
       <div class="row between" style="cursor:pointer;" data-open="${e.id}">
-        <div>
-          <b>${displayName(e)}</b> ${e.active===false?'<span class="tag tag-off">מושבת</span>':''}
-          ${hasOpenShift(e.id)?'<span class="tag tag-open">משמרת פתוחה</span>':''}
-          ${hasReviewShift(e.id)?'<span class="tag tag-review">דורש בדיקה</span>':''}
-          <div class="muted">משתמש: ${e.username} · ${money(e.hourlyRate)}/שעה</div>
+        <div class="row" style="gap:10px;">
+          ${e.profilePhoto?`<img src="${e.profilePhoto}" style="width:40px;height:40px;object-fit:cover;border-radius:8px;">`:''}
+          <div>
+            <b>${displayName(e)}</b> ${e.workType==='kiosk'?'🖥️':'📱'} ${e.active===false?'<span class="tag tag-off">מושבת</span>':''}
+            ${hasOpenShift(e.id)?'<span class="tag tag-open">משמרת פתוחה</span>':''}
+            ${hasReviewShift(e.id)?'<span class="tag tag-review">דורש בדיקה</span>':''}
+            <div class="muted">${e.workType==='kiosk'?'עובד מחשב':`משתמש: ${e.username}`} · ${money(e.hourlyRate)}/שעה</div>
+          </div>
         </div>
         <div class="mono" style="text-align:left;">
           <div class="muted" style="font-size:12px;">חוב כרגע</div>
@@ -537,33 +540,74 @@ function renderEmployees(){
 
 function openEmployeeForm(empId){
   const emp = empId ? state.employees.find(e=>e.id===empId) : null;
+  const workType = emp ? (emp.workType || 'phone') : 'phone';
+  let pendingPhoto = emp ? (emp.profilePhoto || null) : null;
+
   root.innerHTML = `
     <div class="card">
       <h2>${emp?'עריכת עובד':'עובד חדש'}</h2>
+      <label>סוג עובד</label>
+      <select id="f-worktype">
+        <option value="phone" ${workType==='phone'?'selected':''}>עובד טלפון (QR)</option>
+        <option value="kiosk" ${workType==='kiosk'?'selected':''}>עובד מחשב (עמדת כניסה)</option>
+      </select>
       <label>שם (כפי שנרשם/מוצג לעובד — בולגרית/אנגלית וכו')</label><input id="f-name" value="${emp?emp.name:''}">
       <label>שם בעברית (לשימוש שלך בלבד, לא מוצג לעובד)</label><input id="f-namehe" value="${emp?(emp.nameHe||''):''}">
-      <label>שם משתמש (לכניסה)</label><input id="f-username" value="${emp?emp.username:''}">
-      <label>קוד אישי${emp?' (השאירו ריק כדי לא לשנות)':''}</label><input id="f-pin" placeholder="${emp?'••••':''}">
+      <div id="phone-fields">
+        <label>שם משתמש (לכניסה)</label><input id="f-username" value="${emp?(emp.username||''):''}">
+        <label>קוד אישי${emp?' (השאירו ריק כדי לא לשנות)':''}</label><input id="f-pin" placeholder="${emp?'••••':''}">
+      </div>
       <label>שכר לשעה (€)</label><input id="f-rate" type="number" step="0.01" value="${emp?emp.hourlyRate:''}">
+      <label>תמונת פרופיל (אופציונלי)</label>
+      <input id="f-photo" type="file" accept="image/*">
+      <div id="photo-preview" style="margin-top:8px;">${pendingPhoto?`<img src="${pendingPhoto}" style="width:80px;height:80px;object-fit:cover;border-radius:10px;">`:''}</div>
       <div class="row" style="margin-top:16px;">
         <button class="btn btn-primary" id="btn-save-emp">שמירה</button>
         <button class="btn btn-ghost" id="btn-cancel-emp">ביטול</button>
       </div>
     </div>
   `;
+  const phoneFields = document.getElementById('phone-fields');
+  const syncTypeUi = ()=>{ phoneFields.style.display = document.getElementById('f-worktype').value==='kiosk' ? 'none' : ''; };
+  document.getElementById('f-worktype').onchange = syncTypeUi;
+  syncTypeUi();
+
+  document.getElementById('f-photo').onchange = (e)=>{
+    const file = e.target.files[0];
+    if(!file) return;
+    const img = new Image();
+    const reader = new FileReader();
+    reader.onload = ()=>{
+      img.onload = ()=>{
+        const maxW = 300;
+        const scale = Math.min(1, maxW/img.width);
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width*scale; canvas.height = img.height*scale;
+        canvas.getContext('2d').drawImage(img,0,0,canvas.width,canvas.height);
+        pendingPhoto = canvas.toDataURL('image/jpeg', 0.6);
+        document.getElementById('photo-preview').innerHTML = `<img src="${pendingPhoto}" style="width:80px;height:80px;object-fit:cover;border-radius:10px;">`;
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  };
+
   document.getElementById('btn-cancel-emp').onclick = ()=>{
     if(emp) renderEmployeeDetail(emp.id); else renderEmployees();
   };
   document.getElementById('btn-save-emp').onclick = async ()=>{
     const newPin = document.getElementById('f-pin').value.trim();
+    const wt = document.getElementById('f-worktype').value;
     const data = {
+      workType: wt,
       name: document.getElementById('f-name').value.trim(),
       nameHe: document.getElementById('f-namehe').value.trim(),
-      username: document.getElementById('f-username').value.trim(),
+      username: wt==='kiosk' ? (emp&&emp.username ? emp.username : '') : document.getElementById('f-username').value.trim(),
       hourlyRate: parseFloat(document.getElementById('f-rate').value) || 0,
       active: emp ? (emp.active!==false) : true
     };
-    if(!data.name || !data.username || (!emp && !newPin)){ toast('נא למלא את כל השדות'); return; }
+    if(pendingPhoto) data.profilePhoto = pendingPhoto;
+    if(!data.name || (wt==='phone' && !data.username) || (wt==='phone' && !emp && !newPin)){ toast('נא למלא את כל השדות'); return; }
     if(newPin){
       data.pinHash = await sha256(newPin);
       data.pin = firebase.firestore.FieldValue.delete();
@@ -598,12 +642,15 @@ function renderEmployeeDetail(empId){
     </div>
     <div class="card">
       <div class="row between">
-        <div>
-          <h2>${displayName(emp)}</h2>
-          <span class="muted">${emp.username} · ${money(emp.hourlyRate)}/שעה</span>
-          ${emp.active===false?' <span class="tag tag-off">מושבת</span>':''}
-          ${hasOpenShift(emp.id)?' <span class="tag tag-open">משמרת פתוחה</span>':''}
-          ${hasReviewShift(emp.id)?' <span class="tag tag-review">דורש בדיקה</span>':''}
+        <div class="row" style="gap:12px;">
+          ${emp.profilePhoto?`<img src="${emp.profilePhoto}" style="width:56px;height:56px;object-fit:cover;border-radius:10px;">`:''}
+          <div>
+            <h2>${displayName(emp)} ${emp.workType==='kiosk'?'🖥️':'📱'}</h2>
+            <span class="muted">${emp.workType==='kiosk'?'עובד מחשב':emp.username} · ${money(emp.hourlyRate)}/שעה</span>
+            ${emp.active===false?' <span class="tag tag-off">מושבת</span>':''}
+            ${hasOpenShift(emp.id)?' <span class="tag tag-open">משמרת פתוחה</span>':''}
+            ${hasReviewShift(emp.id)?' <span class="tag tag-review">דורש בדיקה</span>':''}
+          </div>
         </div>
       </div>
       <div class="row" style="margin-top:10px;">
@@ -673,10 +720,12 @@ function employeeTimelineItems(empId){
     } else {
       const inD = s.checkIn ? (s.checkIn.toDate?s.checkIn.toDate():new Date(s.checkIn)) : null;
       const outD = s.checkOut ? (s.checkOut.toDate?s.checkOut.toDate():new Date(s.checkOut)) : null;
-      label = outD ? 'משמרת' : 'כניסה — משמרת פתוחה';
+      const srcTag = s.source==='kiosk' ? '🖥️' : '📱';
+      label = (outD ? 'משמרת' : 'כניסה — משמרת פתוחה') + ' ' + srcTag;
       sub = inD ? `כניסה ${fmtTimeHe(inD)}${locLink(s.checkInLoc,'מיקום')}` : '';
       if(outD) sub += ` ← יציאה ${fmtTimeHe(outD)}${locLink(s.checkOutLoc,'מיקום')} · ${fmtHours(shiftDurationHours(s))} שעות`;
       if(s.needsReview) sub += ' <span class="tag tag-review">דורש בדיקה</span>';
+      if(s.checkInPhoto || s.checkOutPhoto) sub += ` <button class="btn btn-ghost btn-sm" data-view-photo="${s.id}" style="padding:2px 8px;">📷 תמונות</button>`;
     }
     items.push({ date:d, type:'shift', icon:'🕒', label, sub, id:s.id });
   });
@@ -732,14 +781,40 @@ function renderEmployeeTimeline(empId){
 
   cont.querySelectorAll('[data-edit-shift]').forEach(b=>b.onclick=()=>openEditShift(b.dataset.editShift, empId));
   cont.querySelectorAll('[data-edit-pay]').forEach(b=>b.onclick=()=>openPaymentForm(empId, b.dataset.editPay));
+  cont.querySelectorAll('[data-view-photo]').forEach(b=>b.onclick=(e)=>{
+    e.stopPropagation();
+    const s = state.shifts.find(x=>x.id===b.dataset.viewPhoto);
+    showPhotoLightbox([
+      s.checkInPhoto ? {label:'כניסה', src:s.checkInPhoto} : null,
+      s.checkOutPhoto ? {label:'יציאה', src:s.checkOutPhoto} : null
+    ].filter(Boolean));
+  });
+}
+
+// Simple full-screen photo viewer overlay.
+function showPhotoLightbox(photos){
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(18,33,58,.92);z-index:100;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:20px;';
+  overlay.innerHTML = photos.map(p=>`
+    <div style="text-align:center;">
+      <div style="color:#fff;margin-bottom:6px;">${p.label}</div>
+      <img src="${p.src}" style="max-width:90vw;max-height:70vh;border-radius:12px;">
+    </div>
+  `).join('') + `<button class="btn btn-ghost" id="btn-close-lightbox" style="background:#fff;margin-top:10px;">סגירה</button>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#btn-close-lightbox').onclick = ()=>overlay.remove();
+  overlay.onclick = (e)=>{ if(e.target===overlay) overlay.remove(); };
 }
 
 // Printable weekly slip for an employee, in Bulgarian, so they can check their own hours/pay.
 function renderEmployeeSlip(empId, offset){
-  const emp = state.employees.find(e=>e.id===empId);
   const weekStart = periodStartAtOffset(offset);
-  const weekEnd = addDays(weekStart,7);
-  const st = statsForRange(empId, weekStart, weekEnd);
+  buildAndShowSlip(empId, weekStart, addDays(weekStart,7), 'Седмичен отчет / Weekly report', ()=>renderEmployeeDetail(empId));
+}
+
+function buildAndShowSlip(empId, rangeStart, rangeEndExcl, titleLine, backFn){
+  const emp = state.employees.find(e=>e.id===empId);
+  const st = statsForRange(empId, rangeStart, rangeEndExcl);
   const shifts = [...st.shifts].sort((a,b)=>{
     const da = shiftEffectiveDate(a) || new Date(0);
     const db_ = shiftEffectiveDate(b) || new Date(0);
@@ -752,11 +827,10 @@ function renderEmployeeSlip(empId, offset){
       <button class="btn btn-brass btn-sm" id="btn-print" style="margin-right:8px;">הדפסה / שמירה כ-PDF</button>
     </div>
     <div class="card" dir="ltr" style="text-align:left;">
-      <h2 style="font-family:'Heebo',sans-serif;">Седмичен отчет за работа</h2>
-      <p class="muted">Employee weekly work report</p>
+      <h2 style="font-family:'Heebo',sans-serif;">${titleLine}</h2>
       <div class="divider"></div>
       <p><b>Име / Name:</b> ${emp.name}</p>
-      <p><b>Седмица / Week:</b> ${toInputDate(weekStart)} – ${toInputDate(addDays(weekStart,6))}</p>
+      <p><b>Период / Period:</b> ${toInputDate(rangeStart)} – ${toInputDate(addDays(rangeEndExcl,-1))}</p>
       <div class="divider"></div>
       <table style="width:100%;">
         <tr><th style="text-align:left;">Дата / Date</th><th style="text-align:left;">Вход / In</th><th style="text-align:left;">Изход / Out</th><th style="text-align:left;">Часове / Hours</th></tr>
@@ -778,12 +852,46 @@ function renderEmployeeSlip(empId, offset){
       <div class="row between"><span>Общо часове / Total hours</span><b class="mono">${fmtHours(st.hours)}</b></div>
       <div class="row between"><span>Ставка / Rate</span><b class="mono">${money(emp.hourlyRate)}/ч.</b></div>
       <div class="row between"><span>Общо заработено / Total earned</span><b class="mono">${money(st.earned)}</b></div>
-      <div class="row between"><span>Платено тази седмица / Paid this week</span><b class="mono">${money(st.paid)}</b></div>
+      <div class="row between"><span>Платено през периода / Paid in this period</span><b class="mono">${money(st.paid)}</b></div>
       <div class="row between"><b>Остатък / Remaining</b><b class="mono">${money(st.earned-st.paid)}</b></div>
     </div>
   `;
-  document.getElementById('btn-back').onclick = ()=>renderEmployeeDetail(empId);
+  document.getElementById('btn-back').onclick = backFn;
   document.getElementById('btn-print').onclick = ()=>window.print();
+}
+
+// Reports-tab entry point: printable payslip-style report for 1/3/6 months back.
+function renderPayslipReport(){
+  const active = state.employees.filter(e=>e.active!==false);
+  if(!state.slipEmployeeId && active.length) state.slipEmployeeId = active[0].id;
+  if(!state.slipMonths) state.slipMonths = 1;
+
+  const empOptions = active.map(e=>`<option value="${e.id}" ${state.slipEmployeeId===e.id?'selected':''}>${displayName(e)}</option>`).join('');
+
+  root.innerHTML = `
+    <div class="card no-print">
+      ${reportModeTabsHtml()}
+      <label>עובד</label>
+      <select id="f-slip-emp">${empOptions}</select>
+      <label>טווח</label>
+      <select id="f-slip-months">
+        <option value="1" ${state.slipMonths===1?'selected':''}>חודש אחרון</option>
+        <option value="3" ${state.slipMonths===3?'selected':''}>3 חודשים אחרונים</option>
+        <option value="6" ${state.slipMonths===6?'selected':''}>6 חודשים אחרונים</option>
+      </select>
+      <button class="btn btn-brass" id="btn-generate" style="margin-top:12px;">הפק דוח פירוט</button>
+    </div>
+  `;
+  bindReportModeTabs();
+  document.getElementById('f-slip-emp').onchange = (e)=>{ state.slipEmployeeId = e.target.value; };
+  document.getElementById('f-slip-months').onchange = (e)=>{ state.slipMonths = parseInt(e.target.value,10); };
+  document.getElementById('btn-generate').onclick = ()=>{
+    if(!state.slipEmployeeId){ toast('אין עובדים פעילים'); return; }
+    const end = startOfDay(new Date());
+    const start = addMonths(end, -state.slipMonths);
+    const monthsLabel = state.slipMonths===1 ? 'последния месец / last month' : `последните ${state.slipMonths} месеца / last ${state.slipMonths} months`;
+    buildAndShowSlip(state.slipEmployeeId, start, addDays(end,1), `Отчет за ${monthsLabel}`, renderReports);
+  };
 }
 
 function hasOpenShiftInWeek(empId, weekStart){
@@ -1111,6 +1219,7 @@ function logRangeInfo(){
 }
 
 function renderLog(){
+  if(!state.logView) state.logView = 'list'; // 'list' | 'photos'
   const range = logRangeInfo();
   const empOptions = ['<option value="all">כל העובדים</option>']
     .concat(state.employees.map(e=>`<option value="${e.id}" ${state.logEmployeeId===e.id?'selected':''}>${displayName(e)}</option>`));
@@ -1124,6 +1233,10 @@ function renderLog(){
         <button class="tab ${state.logRange==='month'?'active':''}" data-range="month">חודש</button>
         <button class="btn btn-ghost btn-sm" id="btn-refresh-log" style="margin-right:auto;">רענון עכשיו</button>
       </div>
+      <div class="row" style="margin-top:8px;">
+        <button class="tab ${state.logView==='list'?'active':''}" data-view="list">רשימה</button>
+        <button class="tab ${state.logView==='photos'?'active':''}" data-view="photos">תמונות</button>
+      </div>
       <div class="nav-period" style="margin-top:10px;">
         <button id="btn-prev">›</button>
         <div class="period-label"><b>${range.label}</b></div>
@@ -1135,6 +1248,7 @@ function renderLog(){
   document.getElementById('f-log-emp').value = state.logEmployeeId;
   document.getElementById('f-log-emp').onchange = (e)=>{ state.logEmployeeId = e.target.value; renderLog(); };
   root.querySelectorAll('[data-range]').forEach(b=>b.onclick=()=>{ state.logRange=b.dataset.range; state.logOffset=0; renderLog(); });
+  root.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>{ state.logView=b.dataset.view; renderLog(); });
   document.getElementById('btn-prev').onclick = ()=>{ state.logOffset++; renderLog(); };
   document.getElementById('btn-next').onclick = ()=>{ if(state.logOffset>0){ state.logOffset--; renderLog(); } };
   document.getElementById('btn-refresh-log').onclick = async ()=>{ await loadAll(); renderLog(); toast('עודכן'); };
@@ -1151,6 +1265,12 @@ function renderLog(){
   });
 
   const cont = document.getElementById('log-rows');
+
+  if(state.logView === 'photos'){
+    renderLogPhotos(cont, rows);
+    return;
+  }
+
   if(!rows.length){
     cont.innerHTML = '<div class="card"><p class="muted">אין רישומים בטווח זה.</p></div>';
     return;
@@ -1164,7 +1284,8 @@ function renderLog(){
     } else {
       const inD = s.checkIn.toDate ? s.checkIn.toDate() : new Date(s.checkIn);
       const outD = s.checkOut ? (s.checkOut.toDate ? s.checkOut.toDate() : new Date(s.checkOut)) : null;
-      mid = `${fmtDateHe(inD)} · כניסה ${fmtTimeHe(inD)} → יציאה ${outD?fmtTimeHe(outD):'—'}`;
+      const srcTag = s.source==='kiosk' ? '🖥️' : '📱';
+      mid = `${fmtDateHe(inD)} · כניסה ${fmtTimeHe(inD)} → יציאה ${outD?fmtTimeHe(outD):'—'} ${srcTag}`;
     }
     return `<div class="card" style="padding:12px 16px;cursor:pointer;" data-goto="${s.employeeId}">
       <div class="row between">
@@ -1179,6 +1300,46 @@ function renderLog(){
   }).join('');
   cont.querySelectorAll('[data-goto]').forEach(el=>el.onclick=()=>{
     state.tab='employees'; state.detailEmployeeId = el.dataset.goto; renderApp();
+  });
+}
+
+// Grid of every kiosk photo in range, grouped by employee, so you can flip
+// through one person's whole week in a few seconds.
+function renderLogPhotos(cont, rows){
+  const withPhotos = rows.filter(s => s.checkInPhoto || s.checkOutPhoto);
+  if(!withPhotos.length){
+    cont.innerHTML = '<div class="card"><p class="muted">אין תמונות בטווח זה (רק משמרות מעמדת המחשב כוללות תמונה).</p></div>';
+    return;
+  }
+  const byEmp = {};
+  withPhotos.forEach(s=>{
+    (byEmp[s.employeeId] = byEmp[s.employeeId] || []).push(s);
+  });
+  cont.innerHTML = Object.keys(byEmp).map(empId=>{
+    const emp = state.employees.find(e=>e.id===empId);
+    const shifts = byEmp[empId].sort((a,b)=>shiftEffectiveDate(b)-shiftEffectiveDate(a));
+    return `<div class="card">
+      <b>${emp?displayName(emp):'(עובד לא ידוע)'}</b>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;">
+        ${shifts.map(s=>{
+          const inD = s.checkIn?(s.checkIn.toDate?s.checkIn.toDate():new Date(s.checkIn)):null;
+          let thumbs = '';
+          if(s.checkInPhoto) thumbs += `<img src="${s.checkInPhoto}" data-photo-shift="${s.id}" data-photo-kind="in" style="width:64px;height:64px;object-fit:cover;border-radius:8px;cursor:pointer;">`;
+          if(s.checkOutPhoto) thumbs += `<img src="${s.checkOutPhoto}" data-photo-shift="${s.id}" data-photo-kind="out" style="width:64px;height:64px;object-fit:cover;border-radius:8px;cursor:pointer;">`;
+          return `<div style="text-align:center;">
+            <div style="display:flex;gap:4px;">${thumbs}</div>
+            <div class="muted" style="font-size:11px;">${inD?fmtDateHe(inD):''}</div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+  }).join('');
+  cont.querySelectorAll('[data-photo-shift]').forEach(img=>img.onclick=()=>{
+    const s = state.shifts.find(x=>x.id===img.dataset.photoShift);
+    showPhotoLightbox([
+      s.checkInPhoto ? {label:'כניסה', src:s.checkInPhoto} : null,
+      s.checkOutPhoto ? {label:'יציאה', src:s.checkOutPhoto} : null
+    ].filter(Boolean));
   });
 }
 
@@ -1315,10 +1476,15 @@ function renderPayments(){
   }).join('');
 }
 function renderReports(){
-  const active = state.employees.filter(e=>e.active!==false);
+  const typeFilter = state.reportTypeFilter || 'all';
+  const active = state.employees.filter(e=>e.active!==false && (typeFilter==='all' || (e.workType||'phone')===typeFilter));
 
   if(state.reportMode === 'monthweeks'){
     renderMonthWeeksReport();
+    return;
+  }
+  if(state.reportMode === 'slip'){
+    renderPayslipReport();
     return;
   }
 
@@ -1340,7 +1506,13 @@ function renderReports(){
   root.innerHTML = `
     <div class="card no-print">
       ${reportModeTabsHtml()}
-      <div class="nav-period">
+      <label>סוג עובדים</label>
+      <select id="f-type-filter">
+        <option value="all" ${typeFilter==='all'?'selected':''}>הכל</option>
+        <option value="phone" ${typeFilter==='phone'?'selected':''}>עובדי טלפון בלבד</option>
+        <option value="kiosk" ${typeFilter==='kiosk'?'selected':''}>עובדי מחשב בלבד</option>
+      </select>
+      <div class="nav-period" style="margin-top:10px;">
         <button id="btn-prev">›</button>
         <div class="period-label"><b>${label}</b></div>
         <button id="btn-next" ${state.reportOffset===0?'disabled style="opacity:.3"':''}>‹</button>
@@ -1362,6 +1534,7 @@ function renderReports(){
     </div>
   `;
   bindReportModeTabs();
+  document.getElementById('f-type-filter').onchange = (e)=>{ state.reportTypeFilter = e.target.value; renderReports(); };
   document.getElementById('btn-prev').onclick = ()=>{ state.reportOffset++; renderReports(); };
   document.getElementById('btn-next').onclick = ()=>{ if(state.reportOffset>0){ state.reportOffset--; renderReports(); } };
   document.getElementById('btn-print').onclick = ()=>window.print();
@@ -1385,6 +1558,7 @@ function reportModeTabsHtml(){
     <button class="tab ${state.reportMode==='month'?'active':''}" data-mode="month">חודשי</button>
     <button class="tab ${state.reportMode==='monthweeks'?'active':''}" data-mode="monthweeks">חודשי לפי שבועות</button>
     <button class="tab ${state.reportMode==='year'?'active':''}" data-mode="year">שנתי</button>
+    <button class="tab ${state.reportMode==='slip'?'active':''}" data-mode="slip">דוח פירוט לעובד</button>
   </div>`;
 }
 function bindReportModeTabs(){
@@ -1499,7 +1673,15 @@ function renderQr(){
 // ---------- settings ----------
 function renderSettings(){
   const biz = state.config.businessLocation;
+  const base = location.href.replace(/admin\.html.*$/, '');
   root.innerHTML = `
+    <div class="card">
+      <h2>הקישורים שלכם</h2>
+      <p class="muted" style="font-size:13px;">שלושה מסכים נפרדים באותו אתר:</p>
+      <p style="font-size:13px;">📱 <b>עובדי טלפון:</b><br><span class="mono" style="word-break:break-all;">${base}index.html</span></p>
+      <p style="font-size:13px;">🖥️ <b>עמדת כניסה (מחשב):</b><br><span class="mono" style="word-break:break-all;">${base}kiosk.html</span></p>
+      <p style="font-size:13px;">🔑 <b>ניהול (המסך הזה):</b><br><span class="mono" style="word-break:break-all;">${base}admin.html</span></p>
+    </div>
     <div class="card">
       <h2>שינוי קוד גישה</h2>
       <label>קוד גישה חדש</label>
@@ -1523,6 +1705,11 @@ function renderSettings(){
         <button class="btn btn-brass btn-sm" id="btn-use-here">השתמש במיקום הנוכחי שלי כעת</button>
       </div>
       <button class="btn btn-primary btn-sm" style="margin-top:10px;" id="btn-save-biz">שמירה</button>
+    </div>
+    <div class="card">
+      <h2>ניקוי תמונות ישנות</h2>
+      <p class="muted">תמונות מעמדת המחשב תופסות מקום. הכפתור מוחק רק את התמונות (השעות והנתונים נשארים) ממשמרות בנות יותר מ-3 חודשים. מומלץ להריץ מדי כמה חודשים.</p>
+      <button class="btn btn-ghost" id="btn-clean-photos">מחיקת תמונות מעל 3 חודשים</button>
     </div>
     <div class="card">
       <h2>גיבוי נתונים</h2>
@@ -1566,6 +1753,23 @@ function renderSettings(){
     state.config.businessRadius = radius;
     renderSettings();
     toast('מיקום העסק נשמר');
+  };
+  document.getElementById('btn-clean-photos').onclick = async ()=>{
+    const cutoff = addMonths(new Date(), -3);
+    const targets = state.shifts.filter(s=>{
+      const d = shiftEffectiveDate(s);
+      return d && d < cutoff && (s.checkInPhoto || s.checkOutPhoto);
+    });
+    if(!targets.length){ toast('אין תמונות ישנות למחיקה'); return; }
+    if(!confirm(`למחוק תמונות מ-${targets.length} משמרות ישנות (מעל 3 חודשים)? הנתונים עצמם (שעות) יישארו.`)) return;
+    for(const s of targets){
+      await db.collection('shifts').doc(s.id).update({
+        checkInPhoto: firebase.firestore.FieldValue.delete(),
+        checkOutPhoto: firebase.firestore.FieldValue.delete()
+      });
+    }
+    await loadAll();
+    toast(`נמחקו תמונות מ-${targets.length} משמרות`);
   };
   document.getElementById('btn-backup').onclick = ()=>{
     const data = { employees: state.employees, shifts: state.shifts, payments: state.payments, notes: state.notes, config: state.config, exportedAt: new Date().toISOString() };
