@@ -179,13 +179,32 @@ function statsForRange(empId, startDate, endDateExcl){
   });
   const hours = shifts.reduce((s,sh)=>s+shiftDurationHours(sh),0);
   const pays = state.payments.filter(p=>{
-    if(p.employeeId !== empId || p.isTip) return false;
+    if(p.employeeId !== empId || p.isTip || p.isAdjustment) return false;
     const d = paymentEffectiveDate(p);
     return d && d >= startDate && d < endDateExcl;
   });
   const paid = pays.reduce((s,p)=>s+(p.amount||0),0);
   const earned = hours*rate;
   return { hours, earned, paid, shifts, payments: pays };
+}
+
+// Cumulative totals from the beginning of time up to (but not including) a fixed
+// cutoff date. Unlike the lifetime total, this number is "frozen" at the cutoff —
+// it won't keep growing just because more days have passed in an in-progress week.
+// Use this to answer "what did I owe as of the end of last week", separate from
+// "what do I owe right now including the days that have happened since".
+function statsUpTo(empId, cutoff){
+  const rate = (state.employees.find(e=>e.id===empId)||{}).hourlyRate || 0;
+  const hours = state.shifts
+    .filter(s=>s.employeeId===empId && isCountable(s))
+    .filter(s=>{ const d = shiftEffectiveDate(s); return d && d < cutoff; })
+    .reduce((sum,s)=>sum+shiftDurationHours(s), 0);
+  const paid = state.payments
+    .filter(p=>p.employeeId===empId && !p.isTip)
+    .filter(p=>{ const d = paymentEffectiveDate(p); return d && d < cutoff; })
+    .reduce((s,p)=>s+(p.amount||0),0);
+  const earned = hours*rate;
+  return { hours, earned, paid, remaining: earned-paid };
 }
 function weekStats(empId, offset){
   const start = periodStartAtOffset(offset);
@@ -376,9 +395,14 @@ function renderPayroll(){
   const rows = active.map(e=>{
     const st = statsForRange(e.id, weekStart, weekEnd);
     const remaining = Math.max(0, st.earned - st.paid);
-    return { emp:e, ...st, remaining };
+    // Cumulative debt frozen at the END of this specific week — includes any older
+    // unpaid weeks, but never includes anything from after this week, so it doesn't
+    // shift around just because more days passed since.
+    const cumulative = Math.max(0, statsUpTo(e.id, weekEnd).remaining);
+    return { emp:e, ...st, remaining, cumulative };
   });
-  const totalRemaining = rows.reduce((s,r)=>s+r.remaining,0);
+  const totalThisWeek = rows.reduce((s,r)=>s+r.remaining,0);
+  const totalCumulative = rows.reduce((s,r)=>s+r.cumulative,0);
 
   root.innerHTML = `
     <div class="card no-print">
@@ -393,9 +417,9 @@ function renderPayroll(){
       </div>
     </div>
     <div class="card">
-      <p class="muted">סה"כ נותר לשלם לכולם עבור השבוע הזה</p>
-      <div class="big-num">${money(totalRemaining)}</div>
-      <button class="btn btn-brass" id="btn-pay-all" style="margin-top:10px;">שלם לכולם את הסכום המלא</button>
+      <div class="row between"><span class="muted">רק השבוע הזה</span><b class="mono">${money(totalThisWeek)}</b></div>
+      <div class="row between"><span class="muted">סה"כ כולל חובות ישנים (עד סוף השבוע הזה)</span><b class="mono">${money(totalCumulative)}</b></div>
+      <button class="btn btn-brass" id="btn-pay-all" style="margin-top:10px;">שלם לכולם לפי "סכום לתשלום" למטה</button>
     </div>
     <div id="payroll-rows"></div>
   `;
@@ -406,49 +430,71 @@ function renderPayroll(){
   cont.innerHTML = rows.map(r=>`
     <div class="card">
       <div class="row between"><b>${displayName(r.emp)}</b><span class="mono">${fmtHours(r.hours)} ש'</span></div>
-      <div class="row between muted"><span>הגיע (${money(r.emp.hourlyRate)}/שעה)</span><span class="mono">${money(r.earned)}</span></div>
+      <div class="row between muted"><span>הגיע השבוע (${money(r.emp.hourlyRate)}/שעה)</span><span class="mono">${money(r.earned)}</span></div>
       <div class="row between muted"><span>כבר שולם השבוע</span><span class="mono">${money(r.paid)}</span></div>
+      <div class="row between"><b>נותר רק לשבוע הזה</b><b class="mono">${money(r.remaining)}</b></div>
+      <div class="row between muted" style="font-size:12px;"><span>סה"כ כולל חובות ישנים</span><span class="mono">${money(r.cumulative)}</span></div>
+      <div class="divider"></div>
       <div class="row between" style="margin-top:6px;">
         <label style="margin:0;">סכום לתשלום עכשיו</label>
         <input data-amt="${r.emp.id}" type="number" step="0.01" value="${r.remaining>0?r.remaining.toFixed(2):0}" style="width:110px;text-align:left;">
       </div>
+      <div class="row between" style="margin-top:6px;">
+        <label style="margin:0;">+ טיפ (לא נכנס לחוב)</label>
+        <input data-tip="${r.emp.id}" type="number" step="0.01" value="0" style="width:110px;text-align:left;">
+      </div>
       <div class="row" style="margin-top:10px;">
-        <button class="btn btn-primary btn-sm" data-pay="${r.emp.id}">שלם סכום זה</button>
+        <button class="btn btn-primary btn-sm" data-pay="${r.emp.id}">שלם</button>
+        <button class="btn btn-ghost btn-sm" data-fill-cumulative="${r.emp.id}">מלא לפי הסכום הכולל</button>
         <button class="btn btn-ghost btn-sm" data-open="${r.emp.id}">פתח כרטיס עובד</button>
       </div>
     </div>
   `).join('');
 
+  async function payOne(empId, amt, tip){
+    if(amt > 0){
+      await db.collection('payments').add({
+        employeeId: empId, amount: amt,
+        date: firebase.firestore.Timestamp.fromDate(new Date()),
+        periodKey: periodKeyOf(weekStart)
+      });
+    }
+    if(tip > 0){
+      await db.collection('payments').add({
+        employeeId: empId, amount: tip, isTip: true,
+        date: firebase.firestore.Timestamp.fromDate(new Date())
+      });
+    }
+  }
+
+  cont.querySelectorAll('[data-fill-cumulative]').forEach(b=>b.onclick=()=>{
+    const r = rows.find(x=>x.emp.id===b.dataset.fillCumulative);
+    document.querySelector(`[data-amt="${r.emp.id}"]`).value = r.cumulative>0?r.cumulative.toFixed(2):0;
+  });
   cont.querySelectorAll('[data-pay]').forEach(b=>b.onclick=async()=>{
     const empId = b.dataset.pay;
     const amt = parseFloat(document.querySelector(`[data-amt="${empId}"]`).value) || 0;
-    if(amt <= 0){ toast('נא להזין סכום'); return; }
-    await db.collection('payments').add({
-      employeeId: empId, amount: amt,
-      date: firebase.firestore.Timestamp.fromDate(new Date()),
-      periodKey: periodKeyOf(weekStart)
-    });
+    const tip = parseFloat(document.querySelector(`[data-tip="${empId}"]`).value) || 0;
+    if(amt<=0 && tip<=0){ toast('נא להזין סכום'); return; }
+    await payOne(empId, amt, tip);
     await loadAll(); renderPayroll(); toast('התשלום נשמר');
   });
   cont.querySelectorAll('[data-open]').forEach(b=>b.onclick=()=>{
-    state.tab='employees'; state.detailEmployeeId = b.dataset.open; state.periodOffset = state.payrollOffset; renderApp();
+    state.tab='employees'; state.detailEmployeeId = b.dataset.open; renderApp();
   });
 
   document.getElementById('btn-pay-all').onclick = async ()=>{
     const toPay = rows.filter(r=>{
-      const v = parseFloat(document.querySelector(`[data-amt="${r.emp.id}"]`).value) || 0;
-      return v > 0;
+      const amt = parseFloat(document.querySelector(`[data-amt="${r.emp.id}"]`).value) || 0;
+      const tip = parseFloat(document.querySelector(`[data-tip="${r.emp.id}"]`).value) || 0;
+      return amt > 0 || tip > 0;
     });
     if(!toPay.length){ toast('אין למי לשלם'); return; }
-    if(!confirm(`לשלם ל-${toPay.length} עובדים, סה"כ ${money(totalRemaining)}?`)) return;
+    if(!confirm(`לשלם ל-${toPay.length} עובדים לפי הסכומים שמופיעים למטה?`)) return;
     for(const r of toPay){
-      const v = parseFloat(document.querySelector(`[data-amt="${r.emp.id}"]`).value) || 0;
-      if(v<=0) continue;
-      await db.collection('payments').add({
-        employeeId: r.emp.id, amount: v,
-        date: firebase.firestore.Timestamp.fromDate(new Date()),
-        periodKey: periodKeyOf(weekStart)
-      });
+      const amt = parseFloat(document.querySelector(`[data-amt="${r.emp.id}"]`).value) || 0;
+      const tip = parseFloat(document.querySelector(`[data-tip="${r.emp.id}"]`).value) || 0;
+      await payOne(r.emp.id, amt, tip);
     }
     await loadAll(); renderPayroll(); toast('כל התשלומים נשמרו');
   };
@@ -543,7 +589,8 @@ function renderEmployeeDetail(empId){
   const emp = state.employees.find(e=>e.id===empId);
   if(!emp){ state.detailEmployeeId=null; renderEmployees(); return; }
   const life = employeeLifetimeStats(empId);
-  const w = weekStats(empId, state.periodOffset);
+  const lastWeek = statsForRange(empId, periodStartAtOffset(1), periodStartAtOffset(0));
+  const debtNotIncludingCurrent = statsUpTo(empId, periodStartAtOffset(0)).remaining;
 
   root.innerHTML = `
     <div class="row between no-print" style="margin-bottom:6px;">
@@ -567,40 +614,31 @@ function renderEmployeeDetail(empId){
     </div>
 
     <div class="card center">
-      <p class="muted">חוב כולל כרגע (כל הזמנים)</p>
-      <div class="big-num">${money(life.remaining)}</div>
+      <p class="muted">חוב לא כולל השבוע הנוכחי (עד סוף השבוע שהסתיים)</p>
+      <div class="big-num">${money(debtNotIncludingCurrent)}</div>
+      <div class="divider"></div>
+      <p class="muted">כולל השבוע הנוכחי, עד עכשיו (חלקי)</p>
+      <div class="big-num" style="font-size:24px;">${money(life.remaining)}</div>
       <p class="muted mono" style="margin-top:4px;">${fmtHours(life.hours)} שעות סה"כ · ${money(life.earned)} הגיע · ${money(life.paid)} שולם</p>
+      <p class="muted" style="margin-top:6px;font-size:12px;">שבוע אחרון: ${fmtHours(lastWeek.hours)} שעות · ${money(lastWeek.earned)}</p>
       <div class="row" style="margin-top:12px;">
-        <button class="btn btn-brass" id="btn-add-payment">רישום תשלום</button>
+        <button class="btn btn-brass" id="btn-add-payment">רישום תשלום / טיפ</button>
       </div>
     </div>
 
     <div class="card">
-      <div class="nav-period">
-        <button id="btn-prev-w">›</button>
-        <div class="period-label">
-          <b>${fmtDateHe(w.start)} – ${fmtDateHe(addDays(w.start,6))}</b><br>
-          <span class="muted">${state.periodOffset===0?'השבוע הנוכחי':state.periodOffset+' שבועות אחורה'} · שעות: ${fmtHours(w.hours)} · ${money(w.earned)}</span>
-        </div>
-        <button id="btn-next-w" ${state.periodOffset===0?'disabled style="opacity:.3"':''}>‹</button>
-      </div>
-      <div class="divider"></div>
-      <div id="week-shifts"></div>
-      <div class="row" style="margin-top:10px;">
+      <h3>ציר זמן — הכל, לפי תאריך</h3>
+      <p class="muted" style="font-size:12px;">כניסות, יציאות, תשלומים, טיפים והערות — מהחדש לישן</p>
+      <div id="timeline"></div>
+    </div>
+
+    <div class="card">
+      <h3 style="font-size:15px;">פעולות נוספות</h3>
+      <div class="row" style="flex-wrap:wrap;">
         <button class="btn btn-ghost btn-sm" id="btn-quick">הזנה מהירה (סך שעות)</button>
         <button class="btn btn-ghost btn-sm" id="btn-detail">הזנת משמרת מדויקת</button>
         <button class="btn btn-ghost btn-sm" id="btn-slip">הפק פירוט שבועי לעובד</button>
       </div>
-    </div>
-
-    <div class="card">
-      <h3>כל התשלומים</h3>
-      <div id="all-payments"></div>
-    </div>
-
-    <div class="card">
-      <h3>הערות מהעובד</h3>
-      <div id="emp-notes"></div>
     </div>
   `;
 
@@ -616,67 +654,84 @@ function renderEmployeeDetail(empId){
     await loadAll(); renderEmployeeDetail(empId);
   };
   document.getElementById('btn-add-payment').onclick = ()=>openPaymentForm(emp.id, null);
-  document.getElementById('btn-prev-w').onclick = ()=>{ state.periodOffset++; renderEmployeeDetail(empId); };
-  document.getElementById('btn-next-w').onclick = ()=>{ if(state.periodOffset>0){ state.periodOffset--; renderEmployeeDetail(empId); } };
   document.getElementById('btn-quick').onclick = ()=>openQuickEntry(empId);
   document.getElementById('btn-detail').onclick = ()=>openDetailEntry(empId);
-  document.getElementById('btn-slip').onclick = ()=>renderEmployeeSlip(empId, state.periodOffset);
+  document.getElementById('btn-slip').onclick = ()=>renderEmployeeSlip(empId, 1);
 
-  const wsCont = document.getElementById('week-shifts');
-  if(!w.shifts.length && !hasOpenShiftInWeek(empId, w.start)){
-    wsCont.innerHTML = '<p class="muted">אין רישומים בשבוע זה.</p>';
-  } else {
-    const openInWeek = state.shifts.filter(s=>s.employeeId===empId && !s.checkOut && s.manualTotalHours==null);
-    wsCont.innerHTML = [...w.shifts, ...openInWeek].map(s=>shiftRowHtml(s)).join('');
-    wsCont.querySelectorAll('[data-edit-shift]').forEach(b=>b.onclick=()=>openEditShift(b.dataset.editShift, empId));
-  }
+  renderEmployeeTimeline(empId);
+}
 
-  const payCont = document.getElementById('all-payments');
-  const emPays = state.payments.filter(p=>p.employeeId===empId).sort((a,b)=>{
-    const da = a.date && a.date.toDate ? a.date.toDate() : new Date(a.date||0);
-    const db_ = b.date && b.date.toDate ? b.date.toDate() : new Date(b.date||0);
-    return db_-da;
+// Merges shifts + payments + notes into one chronological, easy-to-scan feed —
+// "when did they come in, when did I pay them, when did they get a tip".
+function employeeTimelineItems(empId){
+  const items = [];
+  state.shifts.filter(s=>s.employeeId===empId).forEach(s=>{
+    const d = shiftEffectiveDate(s) || new Date(0);
+    let label, sub;
+    if(s.manualTotalHours != null){
+      label = 'הזנה ידנית'; sub = `${fmtHours(s.manualTotalHours)} שעות`;
+    } else {
+      const inD = s.checkIn ? (s.checkIn.toDate?s.checkIn.toDate():new Date(s.checkIn)) : null;
+      const outD = s.checkOut ? (s.checkOut.toDate?s.checkOut.toDate():new Date(s.checkOut)) : null;
+      label = outD ? 'משמרת' : 'כניסה — משמרת פתוחה';
+      sub = inD ? `כניסה ${fmtTimeHe(inD)}${locLink(s.checkInLoc,'מיקום')}` : '';
+      if(outD) sub += ` ← יציאה ${fmtTimeHe(outD)}${locLink(s.checkOutLoc,'מיקום')} · ${fmtHours(shiftDurationHours(s))} שעות`;
+      if(s.needsReview) sub += ' <span class="tag tag-review">דורש בדיקה</span>';
+    }
+    items.push({ date:d, type:'shift', icon:'🕒', label, sub, id:s.id });
   });
-  if(!emPays.length){
-    payCont.innerHTML = '<p class="muted">אין עדיין תשלומים רשומים.</p>';
-  } else {
-    payCont.innerHTML = emPays.map(p=>{
-      const d = p.date && p.date.toDate ? p.date.toDate() : new Date(p.date);
-      return `<div class="row between" style="padding:6px 0;border-bottom:1px solid var(--line);">
-        <span>${fmtDateHe(d)} ${p.isTip?'<span class="tag tag-open">טיפ</span>':''}</span>
-        <span class="mono">${money(p.amount)}</span>
-        <span>
-          <button class="btn btn-ghost btn-sm" data-edit-pay="${p.id}">עריכה</button>
-          <button class="btn btn-ghost btn-sm" data-del-pay="${p.id}">מחיקה</button>
-        </span>
-      </div>`;
-    }).join('');
-    payCont.querySelectorAll('[data-edit-pay]').forEach(b=>b.onclick=()=>openPaymentForm(empId, b.dataset.editPay));
-    payCont.querySelectorAll('[data-del-pay]').forEach(b=>b.onclick=async()=>{
-      if(!confirm('למחוק תשלום זה?')) return;
-      await db.collection('payments').doc(b.dataset.delPay).delete();
-      await loadAll(); renderEmployeeDetail(empId);
+  state.payments.filter(p=>p.employeeId===empId).forEach(p=>{
+    const d = p.date ? (p.date.toDate?p.date.toDate():new Date(p.date)) : new Date(0);
+    let sub = money(p.amount);
+    if(!p.isTip && !p.isAdjustment) sub += ` · ${paymentPeriodLabel(p)}`;
+    if(p.note) sub += ` · ${p.note}`;
+    items.push({
+      date:d, type:'payment', icon: p.isTip?'🎁':p.isAdjustment?'⚖️':'💶',
+      label: p.isTip ? 'טיפ / מתנה' : p.isAdjustment ? 'התאמת יתרה' : 'תשלום',
+      sub, id:p.id
     });
-  }
-
-  const notesCont = document.getElementById('emp-notes');
-  const empNotes = state.notes.filter(n=>n.employeeId===empId).sort((a,b)=>{
-    const da = a.createdAt && a.createdAt.toDate ? a.createdAt.toDate() : new Date(0);
-    const db_ = b.createdAt && b.createdAt.toDate ? b.createdAt.toDate() : new Date(0);
-    return db_-da;
   });
-  if(!empNotes.length){
-    notesCont.innerHTML = '<p class="muted">אין הערות.</p>';
-  } else {
-    notesCont.innerHTML = empNotes.map(n=>{
-      const d = n.createdAt && n.createdAt.toDate ? n.createdAt.toDate() : null;
-      const when = d ? `${fmtDateHe(d)} · ${fmtTimeHe(d)}` : '—';
-      return `<div style="padding:8px 0;border-bottom:1px solid var(--line);">
-        <div class="muted" style="font-size:12px;">${when}${locLink(n.location,'מיקום ההערה')}</div>
-        <div style="margin-top:2px;">${n.text}</div>
-      </div>`;
-    }).join('');
-  }
+  state.notes.filter(n=>n.employeeId===empId).forEach(n=>{
+    const d = n.createdAt && n.createdAt.toDate ? n.createdAt.toDate() : new Date(0);
+    items.push({ date:d, type:'note', icon:'💬', label:'הערה מהעובד', sub: n.text + locLink(n.location,'מיקום'), id:n.id });
+  });
+  items.sort((a,b)=>b.date-a.date);
+  return items;
+}
+
+function renderEmployeeTimeline(empId){
+  const items = employeeTimelineItems(empId);
+  const cont = document.getElementById('timeline');
+  if(!items.length){ cont.innerHTML = '<p class="muted">אין עדיין נתונים.</p>'; return; }
+
+  const groups = [];
+  let curKey=null, curGroup=null;
+  items.forEach(it=>{
+    const key = dateKey(it.date);
+    if(key !== curKey){ curKey = key; curGroup = { date: it.date, items: [] }; groups.push(curGroup); }
+    curGroup.items.push(it);
+  });
+
+  cont.innerHTML = groups.map(g => `
+    <div style="margin-top:12px;">
+      <div class="muted" style="font-size:12px;font-weight:700;">${fmtDateHe(g.date)}</div>
+      ${g.items.map(it => `
+        <div class="row between" style="padding:8px 0;border-bottom:1px solid var(--line);align-items:flex-start;">
+          <div>
+            <div>${it.icon} <b>${it.label}</b> <span class="muted" style="font-size:12px;">${fmtTimeHe(it.date)}</span></div>
+            <div class="muted" style="font-size:13px;margin-top:2px;">${it.sub}</div>
+          </div>
+          <span>
+            ${it.type==='shift' ? `<button class="btn btn-ghost btn-sm" data-edit-shift="${it.id}">עריכה</button>` : ''}
+            ${it.type==='payment' ? `<button class="btn btn-ghost btn-sm" data-edit-pay="${it.id}">עריכה</button>` : ''}
+          </span>
+        </div>
+      `).join('')}
+    </div>
+  `).join('');
+
+  cont.querySelectorAll('[data-edit-shift]').forEach(b=>b.onclick=()=>openEditShift(b.dataset.editShift, empId));
+  cont.querySelectorAll('[data-edit-pay]').forEach(b=>b.onclick=()=>openPaymentForm(empId, b.dataset.editPay));
 }
 
 // Printable weekly slip for an employee, in Bulgarian, so they can check their own hours/pay.
@@ -955,6 +1010,8 @@ function openPaymentForm(empId, paymentId, isNav){
   }
   const weekStart = periodStartAtOffset(state.periodOffset);
 
+  const existingType = existing ? (existing.isTip ? 'tip' : existing.isAdjustment ? 'adjustment' : 'normal') : 'normal';
+
   root.innerHTML = `
     <div class="card">
       <h2>${existing?'עריכת תשלום':'רישום תשלום'} — ${displayName(emp)}</h2>
@@ -963,10 +1020,14 @@ function openPaymentForm(empId, paymentId, isNav){
       <input id="f-amount" type="number" step="0.01" value="${existing?existing.amount:(life.remaining>0?life.remaining.toFixed(2):'')}">
       <label>תאריך שבו שולם בפועל</label>
       <input id="f-date" type="date" value="${existing?toInputDate(existDate):today}">
-      <div class="row" style="margin-top:10px;align-items:center;">
-        <input type="checkbox" id="f-tip" style="width:auto;" ${existing&&existing.isTip?'checked':''}>
-        <label style="margin:0;" for="f-tip">זה טיפ / מתנה (לא ייכנס לחישוב החוב, לא מחשב שעות)</label>
-      </div>
+      <label>סוג</label>
+      <select id="f-type">
+        <option value="normal" ${existingType==='normal'?'selected':''}>תשלום רגיל (מקטין חוב, משויך לשבוע)</option>
+        <option value="tip" ${existingType==='tip'?'selected':''}>טיפ / מתנה (לא נכנס לחוב, לא משויך לשבוע)</option>
+        <option value="adjustment" ${existingType==='adjustment'?'selected':''}>התאמת יתרה (מקטין חוב ישן, לא משויך לשבוע מסוים)</option>
+      </select>
+      <label>הערה (אופציונלי)</label>
+      <textarea id="f-note" rows="2" placeholder="לדוגמה: סגירת הפרש ישן">${existing&&existing.note?existing.note:''}</textarea>
       <div id="week-section">
         <label>עבור איזה שבוע התשלום הזה</label>
         <div class="nav-period">
@@ -988,11 +1049,11 @@ function openPaymentForm(empId, paymentId, isNav){
       </div>
     </div>
   `;
-  const tipBox = document.getElementById('f-tip');
+  const typeSel = document.getElementById('f-type');
   const weekSection = document.getElementById('week-section');
-  const syncTipUi = ()=>{ weekSection.style.display = tipBox.checked ? 'none' : ''; };
-  tipBox.onchange = syncTipUi;
-  syncTipUi();
+  const syncTypeUi = ()=>{ weekSection.style.display = typeSel.value==='normal' ? '' : 'none'; };
+  typeSel.onchange = syncTypeUi;
+  syncTypeUi();
   document.getElementById('btn-prev-w').onclick = ()=>{ state.periodOffset++; openPaymentForm(empId, paymentId, true); };
   document.getElementById('btn-next-w').onclick = ()=>{ if(state.periodOffset>0){ state.periodOffset--; openPaymentForm(empId, paymentId, true); } };
   if(!existing){
@@ -1010,27 +1071,32 @@ function openPaymentForm(empId, paymentId, isNav){
   document.getElementById('btn-save').onclick = async ()=>{
     const amount = parseFloat(document.getElementById('f-amount').value);
     const dateStr = document.getElementById('f-date').value;
-    const isTip = document.getElementById('f-tip').checked;
+    const type = document.getElementById('f-type').value;
+    const note = document.getElementById('f-note').value.trim();
     if(!amount || amount<=0 || !dateStr){ toast('נא למלא סכום ותאריך'); return; }
     const targetWeek = periodStartAtOffset(state.periodOffset);
     const payload = {
       employeeId: empId,
       amount,
       date: firebase.firestore.Timestamp.fromDate(new Date(dateStr+'T12:00:00')),
-      isTip
+      isTip: type==='tip',
+      isAdjustment: type==='adjustment',
+      note: note || firebase.firestore.FieldValue.delete()
     };
-    if(isTip){
-      payload.periodKey = firebase.firestore.FieldValue.delete();
-    } else {
+    if(type==='normal'){
       payload.periodKey = periodKeyOf(targetWeek);
+    } else {
+      payload.periodKey = firebase.firestore.FieldValue.delete();
     }
     if(existing){
       await db.collection('payments').doc(existing.id).update(payload);
     } else {
-      if(isTip) delete payload.periodKey; // brand new doc — nothing to delete, just omit
+      if(type!=='normal') delete payload.periodKey; // brand new doc — nothing to delete, just omit
+      if(!note) delete payload.note;
       await db.collection('payments').add(payload);
     }
-    await loadAll(); renderEmployeeDetail(empId); toast(isTip ? 'הטיפ נשמר' : 'נשמר');
+    await loadAll(); renderEmployeeDetail(empId);
+    toast(type==='tip' ? 'הטיפ נשמר' : type==='adjustment' ? 'התאמת היתרה נשמרה' : 'נשמר');
   };
 }
 
@@ -1188,6 +1254,7 @@ function renderExceptions(){
 // ---------- global payments log ----------
 function paymentPeriodLabel(p){
   if(p.isTip) return 'טיפ / מתנה';
+  if(p.isAdjustment) return 'התאמת יתרה';
   if(!p.periodKey) return '—';
   const s = new Date(p.periodKey + 'T00:00:00');
   return `עבור שבוע: ${fmtDateHe(s)} – ${fmtDateHe(addDays(s,6))}`;
@@ -1238,8 +1305,8 @@ function renderPayments(){
         const emp = state.employees.find(e=>e.id===p.employeeId);
         return `<div class="row between" style="padding:6px 0;border-bottom:1px solid var(--line);">
           <div>
-            <div>${emp?displayName(emp):'(עובד לא ידוע)'} ${p.isTip?'<span class="tag tag-open">טיפ</span>':''}</div>
-            <div class="muted" style="font-size:12px;">${paymentPeriodLabel(p)}</div>
+            <div>${emp?displayName(emp):'(עובד לא ידוע)'} ${p.isTip?'<span class="tag tag-open">טיפ</span>':''}${p.isAdjustment?'<span class="tag tag-off">התאמה</span>':''}</div>
+            <div class="muted" style="font-size:12px;">${paymentPeriodLabel(p)}${p.note?' · '+p.note:''}</div>
           </div>
           <b class="mono">${money(p.amount)}</b>
         </div>`;
