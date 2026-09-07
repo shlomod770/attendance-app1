@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="bg" dir="ltr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Работно време — Каса</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  body{ background:var(--ink); }
+  #app{ max-width:720px; margin:0 auto; padding:24px 16px; }
+  .kiosk-btn{
+    display:block; width:100%; padding:22px; margin-bottom:12px;
+    background:#fff; border:1px solid var(--line); border-radius:16px;
+    font-size:22px; font-weight:700; color:var(--ink); text-align:center; cursor:pointer;
+  }
+  .kiosk-btn:active{ background:var(--paper-2); }
+  video, canvas{ width:100%; border-radius:16px; background:#000; }
+  #app h1{ color:var(--paper); text-align:center; }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1 style="font-size:34px;">Работно време</h1>
+  <div id="root"></div>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+<script src="firebase-config.js"></script>
+<script src="app-kiosk.js?v=1"></script>
+</body>
+</html>
