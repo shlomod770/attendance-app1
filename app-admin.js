@@ -284,6 +284,7 @@ function renderGate(){
 // ---------- app shell ----------
 const TABS = [
   ['dashboard','דשבורד'],
+  ['newEmployees','עובדים חדשים'],
   ['payroll','סגירת שבוע'],
   ['log','כניסות ויציאות'],
   ['exceptions','חריגים'],
@@ -294,13 +295,15 @@ const TABS = [
   ['settings','הגדרות']
 ];
 function renderApp(){
+  const pendingCount = state.employees.filter(e=>e.pendingApproval).length;
   tabsEl.innerHTML = TABS.map(([id,label])=>
-    `<button class="tab ${state.tab===id?'active':''}" data-tab="${id}">${label}</button>`
+    `<button class="tab ${state.tab===id?'active':''}" data-tab="${id}">${label}${id==='newEmployees'&&pendingCount?` (${pendingCount})`:''}</button>`
   ).join('');
   tabsEl.querySelectorAll('.tab').forEach(btn=>{
     btn.onclick = ()=>{ state.tab = btn.dataset.tab; state.detailEmployeeId=null; renderApp(); };
   });
   if(state.tab==='dashboard') renderDashboard();
+  else if(state.tab==='newEmployees') renderNewEmployees();
   else if(state.tab==='payroll') renderPayroll();
   else if(state.tab==='log') renderLog();
   else if(state.tab==='employees'){
@@ -510,7 +513,7 @@ function renderEmployees(){
   `;
   document.getElementById('btn-add-emp').onclick = ()=>openEmployeeForm(null);
   const list = document.getElementById('emp-list');
-  state.employees.forEach(e=>{
+  state.employees.filter(e=>!e.pendingApproval).forEach(e=>{
     const stats = employeeLifetimeStats(e.id);
     const card = document.createElement('div');
     card.className = 'card';
@@ -538,6 +541,60 @@ function renderEmployees(){
   });
 }
 
+// Employees who registered themselves at the kiosk sit here until you review
+// their details/photo and set a rate — they don't show in the main list yet.
+function renderNewEmployees(){
+  const pending = state.employees.filter(e=>e.pendingApproval);
+  root.innerHTML = `
+    <div class="card">
+      <h2>עובדים חדשים לאישור</h2>
+      <p class="muted">עובדים שנרשמו בעצמם בעמדת המחשב. בדקו את הפרטים, קבעו שכר לשעה, ואשרו כדי שיעברו לרשימת העובדים הפעילים.</p>
+    </div>
+    <div id="pending-list"></div>
+  `;
+  const list = document.getElementById('pending-list');
+  if(!pending.length){
+    list.innerHTML = '<div class="card"><p class="muted">אין כרגע עובדים חדשים הממתינים לאישור.</p></div>';
+    return;
+  }
+  list.innerHTML = pending.map(e=>`
+    <div class="card">
+      <div class="row" style="gap:12px;">
+        ${e.profilePhoto?`<img src="${e.profilePhoto}" style="width:64px;height:64px;object-fit:cover;border-radius:10px;">`:''}
+        <div>
+          <b>${e.name}</b><br>
+          <span class="muted">${e.employmentType==='oneoff'?'עובד חד פעמי':'עובד קבוע'}</span>
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <div style="flex:1;">
+          <label>שכר לשעה (€)</label>
+          <input data-rate="${e.id}" type="number" step="0.01" value="${e.hourlyRate||0}">
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <button class="btn btn-brass btn-sm" data-approve="${e.id}">אישור והעברה לרשימה הפעילה</button>
+        <button class="btn btn-ghost btn-sm" data-edit="${e.id}">עריכת פרטים / תמונה</button>
+        <button class="btn btn-danger btn-sm" data-reject="${e.id}">מחיקה</button>
+      </div>
+    </div>
+  `).join('');
+  list.querySelectorAll('[data-approve]').forEach(b=>b.onclick=async()=>{
+    const rate = parseFloat(document.querySelector(`[data-rate="${b.dataset.approve}"]`).value) || 0;
+    await db.collection('employees').doc(b.dataset.approve).update({
+      hourlyRate: rate,
+      pendingApproval: firebase.firestore.FieldValue.delete()
+    });
+    await loadAll(); renderApp(); toast('העובד אושר');
+  });
+  list.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>openEmployeeForm(b.dataset.edit));
+  list.querySelectorAll('[data-reject]').forEach(b=>b.onclick=async()=>{
+    if(!confirm('למחוק את הרישום הזה לגמרי?')) return;
+    await db.collection('employees').doc(b.dataset.reject).delete();
+    await loadAll(); renderApp();
+  });
+}
+
 function openEmployeeForm(empId){
   const emp = empId ? state.employees.find(e=>e.id===empId) : null;
   const workType = emp ? (emp.workType || 'phone') : 'phone';
@@ -557,6 +614,13 @@ function openEmployeeForm(empId){
         <label>שם משתמש (לכניסה)</label><input id="f-username" value="${emp?(emp.username||''):''}">
         <label>קוד אישי${emp?' (השאירו ריק כדי לא לשנות)':''}</label><input id="f-pin" placeholder="${emp?'••••':''}">
       </div>
+      <div id="kiosk-fields">
+        <label>סוג העסקה</label>
+        <select id="f-employment-type">
+          <option value="permanent" ${(!emp||emp.employmentType!=='oneoff')?'selected':''}>עובד קבוע</option>
+          <option value="oneoff" ${emp&&emp.employmentType==='oneoff'?'selected':''}>עובד חד פעמי</option>
+        </select>
+      </div>
       <label>שכר לשעה (€)</label><input id="f-rate" type="number" step="0.01" value="${emp?emp.hourlyRate:''}">
       <label>תמונת פרופיל (אופציונלי)</label>
       <input id="f-photo" type="file" accept="image/*">
@@ -568,7 +632,12 @@ function openEmployeeForm(empId){
     </div>
   `;
   const phoneFields = document.getElementById('phone-fields');
-  const syncTypeUi = ()=>{ phoneFields.style.display = document.getElementById('f-worktype').value==='kiosk' ? 'none' : ''; };
+  const kioskFields = document.getElementById('kiosk-fields');
+  const syncTypeUi = ()=>{
+    const isKiosk = document.getElementById('f-worktype').value==='kiosk';
+    phoneFields.style.display = isKiosk ? 'none' : '';
+    kioskFields.style.display = isKiosk ? '' : 'none';
+  };
   document.getElementById('f-worktype').onchange = syncTypeUi;
   syncTypeUi();
 
@@ -592,9 +661,12 @@ function openEmployeeForm(empId){
     reader.readAsDataURL(file);
   };
 
-  document.getElementById('btn-cancel-emp').onclick = ()=>{
-    if(emp) renderEmployeeDetail(emp.id); else renderEmployees();
+  const goBack = ()=>{
+    if(emp && emp.pendingApproval){ state.tab='newEmployees'; renderApp(); }
+    else if(emp){ renderEmployeeDetail(emp.id); }
+    else renderEmployees();
   };
+  document.getElementById('btn-cancel-emp').onclick = goBack;
   document.getElementById('btn-save-emp').onclick = async ()=>{
     const newPin = document.getElementById('f-pin').value.trim();
     const wt = document.getElementById('f-worktype').value;
@@ -606,6 +678,7 @@ function openEmployeeForm(empId){
       hourlyRate: parseFloat(document.getElementById('f-rate').value) || 0,
       active: emp ? (emp.active!==false) : true
     };
+    if(wt==='kiosk') data.employmentType = document.getElementById('f-employment-type').value;
     if(pendingPhoto) data.profilePhoto = pendingPhoto;
     if(!data.name || (wt==='phone' && !data.username) || (wt==='phone' && !emp && !newPin)){ toast('נא למלא את כל השדות'); return; }
     if(newPin){
@@ -736,7 +809,7 @@ function employeeTimelineItems(empId){
     if(p.note) sub += ` · ${p.note}`;
     items.push({
       date:d, type:'payment', icon: p.isTip?'🎁':p.isAdjustment?'⚖️':'💶',
-      label: p.isTip ? 'טיפ / מתנה' : p.isAdjustment ? 'התאמת יתרה' : 'תשלום',
+      label: p.isTip ? 'טיפ / מתנה' : p.isAdjustment ? 'סגירת חוב' : 'תשלום',
       sub, id:p.id
     });
   });
@@ -820,6 +893,16 @@ function buildAndShowSlip(empId, rangeStart, rangeEndExcl, titleLine, backFn){
     const db_ = shiftEffectiveDate(b) || new Date(0);
     return da - db_;
   });
+  const allPaymentsInRange = state.payments.filter(p=>{
+    if(p.employeeId !== empId) return false;
+    const d = p.date ? (p.date.toDate?p.date.toDate():new Date(p.date)) : null;
+    return d && d >= rangeStart && d < rangeEndExcl;
+  }).sort((a,b)=>{
+    const da = a.date.toDate?a.date.toDate():new Date(a.date);
+    const db_ = b.date.toDate?b.date.toDate():new Date(b.date);
+    return da - db_;
+  });
+  const paymentTypeLabel = (p)=> p.isTip ? 'Бакшиш / Tip' : p.isAdjustment ? 'Закриване на дълг / Debt closure' : 'Заплащане / Payment';
 
   root.innerHTML = `
     <div class="card no-print">
@@ -832,6 +915,7 @@ function buildAndShowSlip(empId, rangeStart, rangeEndExcl, titleLine, backFn){
       <p><b>Име / Name:</b> ${emp.name}</p>
       <p><b>Период / Period:</b> ${toInputDate(rangeStart)} – ${toInputDate(addDays(rangeEndExcl,-1))}</p>
       <div class="divider"></div>
+      <p><b>Часове по дни / Hours by day</b></p>
       <table style="width:100%;">
         <tr><th style="text-align:left;">Дата / Date</th><th style="text-align:left;">Вход / In</th><th style="text-align:left;">Изход / Out</th><th style="text-align:left;">Часове / Hours</th></tr>
         ${shifts.map(s=>{
@@ -849,10 +933,25 @@ function buildAndShowSlip(empId, rangeStart, rangeEndExcl, titleLine, backFn){
         }).join('')}
       </table>
       <div class="divider"></div>
+      <p><b>Плащания / Payments</b></p>
+      ${allPaymentsInRange.length ? `
+      <table style="width:100%;">
+        <tr><th style="text-align:left;">Дата / Date</th><th style="text-align:left;">Вид / Type</th><th style="text-align:left;">Сума / Amount</th></tr>
+        ${allPaymentsInRange.map(p=>{
+          const d = p.date.toDate?p.date.toDate():new Date(p.date);
+          return `<tr>
+            <td>${toInputDate(d)}</td>
+            <td>${paymentTypeLabel(p)}${p.note?` — ${p.note}`:''}</td>
+            <td class="mono">${money(p.amount)}</td>
+          </tr>`;
+        }).join('')}
+      </table>
+      ` : `<p class="muted">Няма плащания през този период. / No payments in this period.</p>`}
+      <div class="divider"></div>
       <div class="row between"><span>Общо часове / Total hours</span><b class="mono">${fmtHours(st.hours)}</b></div>
       <div class="row between"><span>Ставка / Rate</span><b class="mono">${money(emp.hourlyRate)}/ч.</b></div>
       <div class="row between"><span>Общо заработено / Total earned</span><b class="mono">${money(st.earned)}</b></div>
-      <div class="row between"><span>Платено през периода / Paid in this period</span><b class="mono">${money(st.paid)}</b></div>
+      <div class="row between"><span>Платено (заплата) / Paid (wages)</span><b class="mono">${money(st.paid)}</b></div>
       <div class="row between"><b>Остатък / Remaining</b><b class="mono">${money(st.earned-st.paid)}</b></div>
     </div>
   `;
@@ -1132,7 +1231,7 @@ function openPaymentForm(empId, paymentId, isNav){
       <select id="f-type">
         <option value="normal" ${existingType==='normal'?'selected':''}>תשלום רגיל (מקטין חוב, משויך לשבוע)</option>
         <option value="tip" ${existingType==='tip'?'selected':''}>טיפ / מתנה (לא נכנס לחוב, לא משויך לשבוע)</option>
-        <option value="adjustment" ${existingType==='adjustment'?'selected':''}>התאמת יתרה (מקטין חוב ישן, לא משויך לשבוע מסוים)</option>
+        <option value="adjustment" ${existingType==='adjustment'?'selected':''}>סגירת חוב (מוחק חוב ישן לגמרי, לא נחשב תשלום שכר)</option>
       </select>
       <label>הערה (אופציונלי)</label>
       <textarea id="f-note" rows="2" placeholder="לדוגמה: סגירת הפרש ישן">${existing&&existing.note?existing.note:''}</textarea>
@@ -1204,7 +1303,7 @@ function openPaymentForm(empId, paymentId, isNav){
       await db.collection('payments').add(payload);
     }
     await loadAll(); renderEmployeeDetail(empId);
-    toast(type==='tip' ? 'הטיפ נשמר' : type==='adjustment' ? 'התאמת היתרה נשמרה' : 'נשמר');
+    toast(type==='tip' ? 'הטיפ נשמר' : type==='adjustment' ? 'החוב נסגר' : 'נשמר');
   };
 }
 
@@ -1415,7 +1514,7 @@ function renderExceptions(){
 // ---------- global payments log ----------
 function paymentPeriodLabel(p){
   if(p.isTip) return 'טיפ / מתנה';
-  if(p.isAdjustment) return 'התאמת יתרה';
+  if(p.isAdjustment) return 'סגירת חוב';
   if(!p.periodKey) return '—';
   const s = new Date(p.periodKey + 'T00:00:00');
   return `עבור שבוע: ${fmtDateHe(s)} – ${fmtDateHe(addDays(s,6))}`;
@@ -1466,7 +1565,7 @@ function renderPayments(){
         const emp = state.employees.find(e=>e.id===p.employeeId);
         return `<div class="row between" style="padding:6px 0;border-bottom:1px solid var(--line);">
           <div>
-            <div>${emp?displayName(emp):'(עובד לא ידוע)'} ${p.isTip?'<span class="tag tag-open">טיפ</span>':''}${p.isAdjustment?'<span class="tag tag-off">התאמה</span>':''}</div>
+            <div>${emp?displayName(emp):'(עובד לא ידוע)'} ${p.isTip?'<span class="tag tag-open">טיפ</span>':''}${p.isAdjustment?'<span class="tag tag-off">סגירת חוב</span>':''}</div>
             <div class="muted" style="font-size:12px;">${paymentPeriodLabel(p)}${p.note?' · '+p.note:''}</div>
           </div>
           <b class="mono">${money(p.amount)}</b>
@@ -1708,8 +1807,14 @@ function renderSettings(){
     </div>
     <div class="card">
       <h2>ניקוי תמונות ישנות</h2>
-      <p class="muted">תמונות מעמדת המחשב תופסות מקום. הכפתור מוחק רק את התמונות (השעות והנתונים נשארים) ממשמרות בנות יותר מ-3 חודשים. מומלץ להריץ מדי כמה חודשים.</p>
-      <button class="btn btn-ghost" id="btn-clean-photos">מחיקת תמונות מעל 3 חודשים</button>
+      <p class="muted">תמונות מעמדת המחשב תופסות מקום. הכפתור מוחק רק את התמונות (השעות והנתונים נשארים) — לא מוחק שום דבר אחר.</p>
+      <label>מחק תמונות מעל</label>
+      <select id="f-clean-months">
+        <option value="1">חודש</option>
+        <option value="3">3 חודשים</option>
+        <option value="6">6 חודשים</option>
+      </select>
+      <button class="btn btn-ghost" style="margin-top:10px;" id="btn-clean-photos">מחיקת תמונות ישנות</button>
     </div>
     <div class="card">
       <h2>גיבוי נתונים</h2>
@@ -1755,13 +1860,14 @@ function renderSettings(){
     toast('מיקום העסק נשמר');
   };
   document.getElementById('btn-clean-photos').onclick = async ()=>{
-    const cutoff = addMonths(new Date(), -3);
+    const months = parseInt(document.getElementById('f-clean-months').value,10) || 1;
+    const cutoff = addMonths(new Date(), -months);
     const targets = state.shifts.filter(s=>{
       const d = shiftEffectiveDate(s);
       return d && d < cutoff && (s.checkInPhoto || s.checkOutPhoto);
     });
     if(!targets.length){ toast('אין תמונות ישנות למחיקה'); return; }
-    if(!confirm(`למחוק תמונות מ-${targets.length} משמרות ישנות (מעל 3 חודשים)? הנתונים עצמם (שעות) יישארו.`)) return;
+    if(!confirm(`למחוק תמונות מ-${targets.length} משמרות ישנות (מעל ${months===1?'חודש':months+' חודשים'})? הנתונים עצמם (שעות) יישארו.`)) return;
     for(const s of targets){
       await db.collection('shifts').doc(s.id).update({
         checkInPhoto: firebase.firestore.FieldValue.delete(),
