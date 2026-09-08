@@ -14,6 +14,8 @@ function toast(msg){
 function fmtTime(d){ return d.toLocaleTimeString('bg-BG', {hour:'2-digit', minute:'2-digit'}); }
 
 // ---- inactivity auto-reset: any tap anywhere resets the 15s timer ----
+// This only ever calls our own renderMain() function — never location.reload()
+// or a real page refresh — so no camera permission prompts or flicker.
 function armIdleTimer(){
   clearTimeout(idleTimer);
   idleTimer = setTimeout(()=>{
@@ -50,27 +52,53 @@ async function loadKioskEmployees(){
     .sort((a,b)=>a.name.localeCompare(b.name,'bg'));
 }
 
-async function renderMain(){
+// ---- Main screen: clean, just two big buttons. No name list shown here. ----
+function renderMain(){
+  armIdleTimer();
+  root.innerHTML = `
+    <button class="kiosk-btn" id="btn-shift" style="padding:34px;font-size:26px;background:var(--ink);color:#fff;">Начало / Край на смяна</button>
+    <div style="height:40px;"></div>
+    <button class="kiosk-btn" id="btn-new" style="background:var(--brass);font-size:17px;">Нов служител, който още не е в системата? Натиснете тук</button>
+  `;
+  document.getElementById('btn-shift').onclick = renderPicker;
+  document.getElementById('btn-new').onclick = renderNewEmployeeForm;
+}
+
+// ---- Employee picker grid: fetched fresh only when opened, not on every idle reset ----
+async function renderPicker(){
   armIdleTimer();
   root.innerHTML = `<div class="card center"><p class="muted">Зареждане...</p></div>`;
   await loadKioskEmployees();
+  if(!kioskEmployees.length){
+    root.innerHTML = `<div class="card center"><p class="muted">Все още няма служители тук.</p><button class="btn btn-ghost" id="btn-back" style="margin-top:10px;">Назад</button></div>`;
+    document.getElementById('btn-back').onclick = renderMain;
+    return;
+  }
   root.innerHTML = `
-    <div id="list"></div>
-    <button class="kiosk-btn" id="btn-new" style="background:var(--brass);">+ Нов служител</button>
+    <div class="row between no-print" style="margin-bottom:10px;">
+      <button class="btn btn-ghost btn-sm" id="btn-back">← Назад</button>
+    </div>
+    <div id="grid" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;"></div>
   `;
-  const list = document.getElementById('list');
-  list.innerHTML = kioskEmployees.map(e=>`<button class="kiosk-btn" data-emp="${e.id}">${e.name}</button>`).join('');
-  list.querySelectorAll('[data-emp]').forEach(b=>b.onclick=()=>{
+  document.getElementById('btn-back').onclick = renderMain;
+  const grid = document.getElementById('grid');
+  grid.innerHTML = kioskEmployees.map(e=>`
+    <button class="kiosk-btn" data-emp="${e.id}" style="padding:14px;font-size:16px;">
+      ${e.profilePhoto?`<img src="${e.profilePhoto}" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:10px;margin-bottom:8px;">`:''}
+      ${e.name}
+    </button>
+  `).join('');
+  grid.querySelectorAll('[data-emp]').forEach(b=>b.onclick=()=>{
     const emp = kioskEmployees.find(x=>x.id===b.dataset.emp);
     renderConfirm(emp);
   });
-  document.getElementById('btn-new').onclick = renderNewEmployeeForm;
 }
 
 function renderConfirm(emp){
   armIdleTimer();
   root.innerHTML = `
     <div class="card center">
+      ${emp.profilePhoto?`<img src="${emp.profilePhoto}" style="width:90px;height:90px;object-fit:cover;border-radius:14px;margin-bottom:10px;">`:''}
       <h2 style="font-size:26px;">Вие ли сте ${emp.name}?</h2>
       <div class="row" style="margin-top:16px;">
         <button class="btn btn-primary" id="btn-yes" style="font-size:18px;padding:18px;">Да, аз съм</button>
@@ -78,37 +106,98 @@ function renderConfirm(emp){
       </div>
     </div>
   `;
-  document.getElementById('btn-yes').onclick = ()=>renderCapture(emp);
-  document.getElementById('btn-no').onclick = renderMain;
+  document.getElementById('btn-yes').onclick = ()=>{
+    capturePhotoFlow(emp.name, emp.profilePhoto, async (photo)=>{
+      await processScanKiosk(emp, photo);
+    });
+  };
+  document.getElementById('btn-no').onclick = renderPicker;
 }
+
+// ---------------- new employee registration ----------------
 
 function renderNewEmployeeForm(){
   armIdleTimer();
   root.innerHTML = `
     <div class="card">
       <h2 style="font-size:22px;">Нов служител</h2>
-      <label>Име и фамилия</label>
-      <input id="f-name" style="font-size:18px;padding:14px;">
+      <div class="row">
+        <div style="flex:1;">
+          <label>Име</label>
+          <input id="f-first" style="font-size:18px;padding:14px;">
+        </div>
+        <div style="flex:1;">
+          <label>Фамилия</label>
+          <input id="f-last" style="font-size:18px;padding:14px;">
+        </div>
+      </div>
+      <label>Вид заетост</label>
+      <select id="f-emptype" style="font-size:18px;padding:14px;">
+        <option value="permanent">Постоянен служител</option>
+        <option value="oneoff">Еднократен служител</option>
+      </select>
       <div class="row" style="margin-top:16px;">
-        <button class="btn btn-primary" id="btn-continue" style="font-size:18px;padding:16px;">Продължи</button>
+        <button class="btn btn-primary" id="btn-continue" style="font-size:18px;padding:16px;">Продължи към снимка</button>
         <button class="btn btn-ghost" id="btn-cancel" style="font-size:18px;padding:16px;">Отказ</button>
       </div>
     </div>
   `;
   document.getElementById('btn-cancel').onclick = renderMain;
   document.getElementById('btn-continue').onclick = ()=>{
-    const name = document.getElementById('f-name').value.trim();
-    if(!name){ toast('Моля, въведете име'); return; }
-    renderCapture(null, name);
+    const first = document.getElementById('f-first').value.trim();
+    const last = document.getElementById('f-last').value.trim();
+    const employmentType = document.getElementById('f-emptype').value;
+    if(!first || !last){ toast('Моля, въведете име и фамилия'); return; }
+    const name = `${first} ${last}`;
+    capturePhotoFlow(name, null, async (photo)=>{
+      await registerEmployee(name, employmentType, photo);
+    });
   };
 }
 
-// emp = existing employee object, or null if this is a brand-new registration (newName given)
-async function renderCapture(emp, newName){
+async function registerEmployee(name, employmentType, photo){
+  const ref = await db.collection('employees').add({
+    name, workType:'kiosk', employmentType, profilePhoto: photo,
+    hourlyRate: 0, active: true, pendingApproval: true
+  });
+  renderStartShiftPrompt({ id: ref.id, name, profilePhoto: photo });
+}
+
+// Registration never auto-starts a shift — we ask explicitly.
+function renderStartShiftPrompt(emp){
   armIdleTimer();
   root.innerHTML = `
     <div class="card center">
-      <h2 style="font-size:20px;">${emp?emp.name:newName}</h2>
+      <h2 style="font-size:22px;">${emp.name} е записан(а) успешно ✓</h2>
+      <p class="muted">Искате ли да започнете смяна сега?</p>
+      <div class="row" style="margin-top:16px;">
+        <button class="btn btn-primary" id="btn-yes" style="font-size:18px;padding:18px;">Да, начало на смяна</button>
+        <button class="btn btn-ghost" id="btn-no" style="font-size:18px;padding:18px;">Не, само запис</button>
+      </div>
+    </div>
+  `;
+  document.getElementById('btn-yes').onclick = ()=>{
+    capturePhotoFlow(emp.name, emp.profilePhoto, async (photo)=>{
+      await processScanKiosk(emp, photo);
+    });
+  };
+  document.getElementById('btn-no').onclick = ()=>{
+    root.innerHTML = `<div class="card center"><h2 style="font-size:22px;">Данните са запазени</h2></div>`;
+    setTimeout(renderMain, 2500);
+  };
+}
+
+// ---------------- shared camera capture component ----------------
+// subjectLabel: name shown while shooting. onPhoto: async fn(photoDataUrl) called after confirm.
+function capturePhotoFlow(subjectLabel, refPhoto, onPhoto){
+  renderCaptureScreen(subjectLabel, onPhoto);
+}
+
+async function renderCaptureScreen(subjectLabel, onPhoto){
+  armIdleTimer();
+  root.innerHTML = `
+    <div class="card center">
+      <h2 style="font-size:20px;">${subjectLabel}</h2>
       <video id="video" autoplay playsinline muted></video>
       <button class="btn btn-brass" id="btn-shoot" style="margin-top:14px;font-size:18px;padding:16px;">📷 Заснемане</button>
       <button class="btn btn-ghost" id="btn-cancel" style="margin-top:8px;">Отказ</button>
@@ -132,15 +221,15 @@ async function renderCapture(emp, newName){
     canvas.getContext('2d').drawImage(video, 0, 0);
     const photo = downscaleToJpeg(canvas, 480);
     stopCamera();
-    renderPreview(emp, newName, photo);
+    renderPreviewScreen(subjectLabel, photo, onPhoto);
   };
 }
 
-function renderPreview(emp, newName, photo){
+function renderPreviewScreen(subjectLabel, photo, onPhoto){
   armIdleTimer();
   root.innerHTML = `
     <div class="card center">
-      <h2 style="font-size:20px;">${emp?emp.name:newName}</h2>
+      <h2 style="font-size:20px;">${subjectLabel}</h2>
       <img src="${photo}" style="width:100%;border-radius:16px;">
       <div class="row" style="margin-top:14px;">
         <button class="btn btn-primary" id="btn-confirm" style="font-size:18px;padding:16px;">Потвърди</button>
@@ -148,15 +237,11 @@ function renderPreview(emp, newName, photo){
       </div>
     </div>
   `;
-  document.getElementById('btn-retake').onclick = ()=>renderCapture(emp, newName);
+  document.getElementById('btn-retake').onclick = ()=>renderCaptureScreen(subjectLabel, onPhoto);
   document.getElementById('btn-confirm').onclick = async ()=>{
     root.innerHTML = `<div class="card center"><p class="muted">Записване...</p></div>`;
     try{
-      if(emp){
-        await processScanKiosk(emp, photo);
-      } else {
-        await registerAndCheckIn(newName, photo);
-      }
+      await onPhoto(photo);
     }catch(err){
       console.error(err);
       toast('Възникна грешка. Опитайте отново.');
@@ -165,21 +250,7 @@ function renderPreview(emp, newName, photo){
   };
 }
 
-async function registerAndCheckIn(name, photo){
-  const ref = await db.collection('employees').add({
-    name, workType:'kiosk', profilePhoto: photo, active: true
-  });
-  await db.collection('shifts').add({
-    employeeId: ref.id,
-    checkIn: firebase.firestore.FieldValue.serverTimestamp(),
-    checkInPhoto: photo,
-    checkOut: null,
-    needsReview: false,
-    note: '',
-    source: 'kiosk'
-  });
-  showResult(true, name, new Date());
-}
+// ---------------- clock in/out ----------------
 
 async function processScanKiosk(emp, photo){
   const now = new Date();
