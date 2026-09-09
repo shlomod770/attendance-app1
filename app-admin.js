@@ -1,6 +1,5 @@
 const root = document.getElementById('root');
 const tabsEl = document.getElementById('tabs');
-const LS_ADMIN_OK = 'twm_admin_ok';
 
 // ---------- state ----------
 let state = {
@@ -8,7 +7,7 @@ let state = {
   shifts: [],
   payments: [],
   notes: [],
-  config: { qrToken:'', adminCode:'1234', periodStartDay:5 },
+  config: { qrToken:'', periodStartDay:5 },
   periodOffset: 0,
   tab: 'dashboard',
   detailEmployeeId: null,
@@ -79,7 +78,7 @@ async function loadAll(){
   if(cfgDoc.exists){
     state.config = { qrToken:'', periodStartDay:5, businessRadius:150, ...cfgDoc.data() };
   } else {
-    state.config = { qrToken: genToken(), adminCodeHash: await sha256('1234'), periodStartDay:5, businessRadius:150 };
+    state.config = { qrToken: genToken(), periodStartDay:5, businessRadius:150 };
     await db.collection('config').doc('main').set(state.config);
   }
 }
@@ -233,15 +232,25 @@ function hasReviewShift(empId){
 
 // ---------- gate ----------
 async function boot(){
-  await loadAll();
-  if(localStorage.getItem(LS_ADMIN_OK) === '1') renderApp();
-  else renderGate();
+  firebase.auth().onAuthStateChanged(async (user)=>{
+    if(user){
+      try{
+        await loadAll();
+        renderApp();
+      }catch(err){
+        console.error(err);
+        root.innerHTML = `<div class="card" style="margin-top:40px;"><p class="muted">שגיאה בטעינת הנתונים. נסו לרענן.</p></div>`;
+      }
+    } else {
+      renderGate();
+    }
+  });
 
   // Live-ish updates: quietly reload data every 20 seconds and re-render
   // only while looking at read-only screens (so we never wipe out a form
   // the manager is in the middle of filling in).
   setInterval(async ()=>{
-    if(localStorage.getItem(LS_ADMIN_OK) !== '1') return;
+    if(!firebase.auth().currentUser) return;
     if(state.tab === 'dashboard' || state.tab === 'log' || state.tab === 'payments' || state.tab === 'exceptions'){
       try{
         await loadAll();
@@ -250,36 +259,32 @@ async function boot(){
     }
   }, 20000);
 }
+
 function renderGate(){
   tabsEl.innerHTML = '';
   root.innerHTML = `
     <div class="card" style="margin-top:40px;">
-      <h2>קוד גישה</h2>
-      <p class="muted">הזינו את קוד הגישה של המנהל.</p>
-      <input id="f-code" type="password" inputmode="numeric" placeholder="קוד גישה">
+      <h2>כניסת מנהל</h2>
+      <p class="muted">התחברות עם האימייל והסיסמה שהגדרתם ב-Firebase.</p>
+      <label>אימייל</label>
+      <input id="f-email" type="email" autocomplete="username">
+      <label>סיסמה</label>
+      <input id="f-password" type="password" autocomplete="current-password">
       <button class="btn btn-primary" style="margin-top:14px;" id="btn-enter">כניסה</button>
       <p class="muted" id="gate-err" style="margin-top:8px;"></p>
     </div>
   `;
   document.getElementById('btn-enter').onclick = async ()=>{
-    const v = document.getElementById('f-code').value.trim();
-    let ok = false;
-    if(state.config.adminCodeHash){
-      ok = (await sha256(v)) === state.config.adminCodeHash;
-    } else if(state.config.adminCode != null){
-      ok = v === String(state.config.adminCode);
-      if(ok){
-        const hash = await sha256(v);
-        await db.collection('config').doc('main').update({ adminCodeHash: hash, adminCode: firebase.firestore.FieldValue.delete() });
-        state.config.adminCodeHash = hash;
-        delete state.config.adminCode;
-      }
-    }
-    if(ok){
-      localStorage.setItem(LS_ADMIN_OK,'1');
-      renderApp();
-    } else {
-      document.getElementById('gate-err').textContent = 'קוד שגוי.';
+    const email = document.getElementById('f-email').value.trim();
+    const password = document.getElementById('f-password').value;
+    const errEl = document.getElementById('gate-err');
+    errEl.textContent = '';
+    if(!email || !password){ errEl.textContent = 'נא למלא אימייל וסיסמה.'; return; }
+    try{
+      await firebase.auth().signInWithEmailAndPassword(email, password);
+      // onAuthStateChanged above takes it from here
+    }catch(err){
+      errEl.textContent = 'אימייל או סיסמה שגויים.';
     }
   };
 }
@@ -1910,10 +1915,16 @@ function renderSettings(){
       <div id="tab-order-list"></div>
     </div>
     <div class="card">
-      <h2>שינוי קוד גישה</h2>
-      <label>קוד גישה חדש</label>
-      <input id="f-newcode" placeholder="הזינו קוד חדש כדי לשנות" type="password">
-      <button class="btn btn-primary btn-sm" style="margin-top:10px;" id="btn-save-code">שמירה</button>
+      <h2>חשבון המנהל</h2>
+      <p class="muted">מחוברים כ: <b>${firebase.auth().currentUser ? firebase.auth().currentUser.email : ''}</b></p>
+      <label>סיסמה נוכחית</label>
+      <input id="f-current-pass" type="password" autocomplete="current-password">
+      <label>סיסמה חדשה</label>
+      <input id="f-new-pass" type="password" autocomplete="new-password">
+      <button class="btn btn-primary btn-sm" style="margin-top:10px;" id="btn-change-pass">שינוי סיסמה</button>
+      <p class="muted" id="pass-msg" style="margin-top:8px;"></p>
+      <div class="divider"></div>
+      <button class="btn btn-ghost" id="btn-logout-admin">יציאה מהמסך המנהל</button>
     </div>
     <div class="card">
       <h2>יום תחילת שבוע שכר</h2>
@@ -1949,20 +1960,26 @@ function renderSettings(){
       <p class="muted">מוריד קובץ עם כל הנתונים הגולמיים (עובדים, משמרות, תשלומים).</p>
       <button class="btn btn-ghost" id="btn-backup">הורדת גיבוי (JSON)</button>
     </div>
-    <div class="card">
-      <button class="btn btn-ghost" id="btn-logout-admin">יציאה מהמסך המנהל</button>
-    </div>
   `;
   renderTabOrderList();
-  document.getElementById('btn-save-code').onclick = async ()=>{
-    const v = document.getElementById('f-newcode').value.trim();
-    if(!v){ toast('נא להזין קוד חדש'); return; }
-    const hash = await sha256(v);
-    await db.collection('config').doc('main').update({adminCodeHash:hash, adminCode: firebase.firestore.FieldValue.delete()});
-    state.config.adminCodeHash = hash;
-    delete state.config.adminCode;
-    document.getElementById('f-newcode').value='';
-    toast('הקוד עודכן');
+  document.getElementById('btn-change-pass').onclick = async ()=>{
+    const currentPass = document.getElementById('f-current-pass').value;
+    const newPass = document.getElementById('f-new-pass').value;
+    const msg = document.getElementById('pass-msg');
+    msg.textContent = '';
+    if(!currentPass || !newPass){ msg.textContent = 'נא למלא את שני השדות.'; return; }
+    if(newPass.length < 6){ msg.textContent = 'הסיסמה החדשה חייבת לפחות 6 תווים.'; return; }
+    try{
+      const user = firebase.auth().currentUser;
+      const cred = firebase.auth.EmailAuthProvider.credential(user.email, currentPass);
+      await user.reauthenticateWithCredential(cred);
+      await user.updatePassword(newPass);
+      document.getElementById('f-current-pass').value='';
+      document.getElementById('f-new-pass').value='';
+      msg.textContent = 'הסיסמה עודכנה בהצלחה.';
+    }catch(err){
+      msg.textContent = 'הסיסמה הנוכחית שגויה, או שגיאה אחרת.';
+    }
   };
   document.getElementById('btn-save-day').onclick = async ()=>{
     const v = parseInt(document.getElementById('f-startday').value,10);
@@ -2014,9 +2031,9 @@ function renderSettings(){
     a.download = `גיבוי-${dateKey(new Date())}.json`;
     a.click();
   };
-  document.getElementById('btn-logout-admin').onclick = ()=>{
-    localStorage.removeItem(LS_ADMIN_OK);
-    renderGate();
+  document.getElementById('btn-logout-admin').onclick = async ()=>{
+    await firebase.auth().signOut();
+    // onAuthStateChanged in boot() will notice and show the login screen
   };
 }
 
