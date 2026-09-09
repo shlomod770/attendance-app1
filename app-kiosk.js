@@ -57,9 +57,16 @@ function renderMain(){
   armIdleTimer();
   root.classList.add('center-content');
   root.innerHTML = `
-    <button class="kiosk-btn" id="btn-shift" style="padding:34px;font-size:26px;background:var(--ink);color:#fff;">Начало / Край на смяна</button>
-    <div style="height:40px;"></div>
-    <button class="kiosk-btn" id="btn-new" style="background:var(--brass);font-size:17px;">Нов служител, който още не е в системата? Натиснете тук</button>
+    <button class="kiosk-primary-btn" id="btn-shift">
+      <span>Начало /<br>Край на смяна</span>
+    </button>
+    <p class="kiosk-caption">
+      Натиснете тук, изберете името си, снимайте се — и часовете ви ще се запишат автоматично.
+      Не забравяйте да отбележите и края на смяната, за да изчислим часовете ви правилно.
+    </p>
+    <div class="kiosk-footer-bar">
+      <button class="kiosk-footer-link" id="btn-new">Нов служител? Натиснете тук</button>
+    </div>
   `;
   document.getElementById('btn-shift').onclick = renderPicker;
   document.getElementById('btn-new').onclick = renderNewEmployeeForm;
@@ -277,14 +284,7 @@ async function processScanKiosk(emp, photo){
   const hoursSince = (now - checkIn) / 3600000;
 
   if(hoursSince > 17){
-    await db.collection('shifts').doc(openDoc.id).update({ needsReview:true });
-    await db.collection('shifts').add({
-      employeeId: emp.id,
-      checkIn: firebase.firestore.FieldValue.serverTimestamp(),
-      checkInPhoto: photo,
-      checkOut: null, needsReview:false, note:'', source:'kiosk'
-    });
-    showResult(true, emp.name, now);
+    showLongShiftChoiceKiosk(emp, openDoc, checkIn, now, photo);
     return;
   }
 
@@ -293,6 +293,41 @@ async function processScanKiosk(emp, photo){
     checkOutPhoto: photo
   });
   showResult(false, emp.name, now, checkIn);
+}
+
+// Same idea as the phone app: don't guess, ask the person directly.
+function showLongShiftChoiceKiosk(emp, openDoc, checkIn, now, photo){
+  armIdleTimer();
+  const hrs = Math.floor((now - checkIn) / 3600000);
+  root.innerHTML = `
+    <div class="card center">
+      <h2 style="font-size:20px;">Мина много време</h2>
+      <p class="muted">${emp.name} влезе на ${checkIn.toLocaleDateString('bg-BG')} в ${fmtTime(checkIn)} (преди около ${hrs} часа).</p>
+      <p>Това ли е изходът от онази смяна, или започвате нова смяна сега?</p>
+      <button class="btn btn-primary" id="btn-choice-checkout" style="margin-top:10px;font-size:17px;padding:16px;">Това е изход от онази смяна</button>
+      <button class="btn btn-ghost" id="btn-choice-newshift" style="margin-top:8px;font-size:17px;padding:16px;">Започвам нова смяна сега</button>
+    </div>
+  `;
+  document.getElementById('btn-choice-checkout').onclick = async ()=>{
+    root.innerHTML = `<div class="card center"><p class="muted">Записване...</p></div>`;
+    await db.collection('shifts').doc(openDoc.id).update({
+      checkOut: firebase.firestore.FieldValue.serverTimestamp(),
+      checkOutPhoto: photo,
+      needsReview: true
+    });
+    showResult(false, emp.name, now, checkIn);
+  };
+  document.getElementById('btn-choice-newshift').onclick = async ()=>{
+    root.innerHTML = `<div class="card center"><p class="muted">Записване...</p></div>`;
+    await db.collection('shifts').doc(openDoc.id).update({ needsReview: true });
+    await db.collection('shifts').add({
+      employeeId: emp.id,
+      checkIn: firebase.firestore.FieldValue.serverTimestamp(),
+      checkInPhoto: photo,
+      checkOut: null, needsReview:false, note:'', source:'kiosk'
+    });
+    showResult(true, emp.name, now);
+  };
 }
 
 function showResult(isCheckIn, name, now, checkIn){
