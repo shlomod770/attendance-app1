@@ -201,7 +201,10 @@ function statsUpTo(empId, cutoff){
     .reduce((sum,s)=>sum+shiftDurationHours(s), 0);
   const paid = state.payments
     .filter(p=>p.employeeId===empId && !p.isTip)
-    .filter(p=>{ const d = paymentEffectiveDate(p); return d && d < cutoff; })
+    // A debt closure is a permanent, immediate write-off — it should reduce the
+    // debt right away no matter when it's dated, not just once its own date is
+    // "in the past" relative to whatever week you happen to be looking at.
+    .filter(p=> p.isAdjustment || (()=>{ const d = paymentEffectiveDate(p); return d && d < cutoff; })())
     .reduce((s,p)=>s+(p.amount||0),0);
   const earned = hours*rate;
   return { hours, earned, paid, remaining: earned-paid };
@@ -294,9 +297,17 @@ const TABS = [
   ['qr','QR'],
   ['settings','הגדרות']
 ];
+function orderedTabs(){
+  const order = state.config.tabOrder;
+  if(!order || !order.length) return TABS;
+  const byId = Object.fromEntries(TABS);
+  const known = order.filter(id=>byId[id]).map(id=>[id, byId[id]]);
+  const missing = TABS.filter(([id])=>!order.includes(id));
+  return [...known, ...missing];
+}
 function renderApp(){
   const pendingCount = state.employees.filter(e=>e.pendingApproval).length;
-  tabsEl.innerHTML = TABS.map(([id,label])=>
+  tabsEl.innerHTML = orderedTabs().map(([id,label])=>
     `<button class="tab ${state.tab===id?'active':''}" data-tab="${id}">${label}${id==='newEmployees'&&pendingCount?` (${pendingCount})`:''}</button>`
   ).join('');
   tabsEl.querySelectorAll('.tab').forEach(btn=>{
@@ -730,6 +741,7 @@ function renderEmployeeDetail(empId){
         <button class="btn btn-ghost btn-sm" id="btn-edit-emp">עריכת פרטים</button>
         <button class="btn btn-ghost btn-sm" id="btn-reset-dev">איפוס מכשיר</button>
         <button class="btn btn-ghost btn-sm" id="btn-toggle-active">${emp.active===false?'הפעלה':'השבתה'}</button>
+        <button class="btn btn-danger btn-sm" id="btn-delete-emp">מחיקה לצמיתות</button>
       </div>
     </div>
 
@@ -772,6 +784,21 @@ function renderEmployeeDetail(empId){
   document.getElementById('btn-toggle-active').onclick = async ()=>{
     await db.collection('employees').doc(emp.id).update({active: emp.active===false ? true : false});
     await loadAll(); renderEmployeeDetail(empId);
+  };
+  document.getElementById('btn-delete-emp').onclick = async ()=>{
+    if(!confirm(`למחוק את ${displayName(emp)} לצמיתות? זה ימחק גם את כל היסטוריית המשמרות, התשלומים וההערות שלו/שלה. הפעולה בלתי הפיכה — אם לא בטוחים, עדיף "השבתה" במקום.`)) return;
+    if(!confirm('אישור אחרון: למחוק לצמיתות?')) return;
+    const empShifts = state.shifts.filter(s=>s.employeeId===emp.id);
+    const empPayments = state.payments.filter(p=>p.employeeId===emp.id);
+    const empNotes = state.notes.filter(n=>n.employeeId===emp.id);
+    for(const s of empShifts) await db.collection('shifts').doc(s.id).delete();
+    for(const p of empPayments) await db.collection('payments').doc(p.id).delete();
+    for(const n of empNotes) await db.collection('notes').doc(n.id).delete();
+    await db.collection('employees').doc(emp.id).delete();
+    await loadAll();
+    state.detailEmployeeId = null;
+    renderApp();
+    toast('העובד נמחק לצמיתות');
   };
   document.getElementById('btn-add-payment').onclick = ()=>openPaymentForm(emp.id, null);
   document.getElementById('btn-quick').onclick = ()=>openQuickEntry(empId);
@@ -879,13 +906,45 @@ function showPhotoLightbox(photos){
   overlay.onclick = (e)=>{ if(e.target===overlay) overlay.remove(); };
 }
 
+const SLIP_STRINGS = {
+  bg: {
+    name:'Име / Name', period:'Период / Period', hoursByDay:'Часове по дни / Hours by day',
+    date:'Дата / Date', in:'Вход / In', out:'Изход / Out', hours:'Часове / Hours',
+    manual:'Ръчно въведено / Manual entry', payments:'Плащания / Payments',
+    type:'Вид / Type', amount:'Сума / Amount', event:'Събитие / Event', timeline:'Дневник / Timeline',
+    noPayments:'Няма плащания през този период. / No payments in this period.',
+    totalHours:'Общо часове / Total hours', rate:'Ставка / Rate', totalEarned:'Общо заработено / Total earned',
+    paidWages:'Платено (заплата) / Paid (wages)', remaining:'Остатък / Remaining',
+    payTip:'Бакшиш / Tip', payAdj:'Закриване на дълг / Debt closure', payNormal:'Заплащане / Payment',
+    checkInWord:'Вход', checkOutWord:'Изход', dir:'ltr', align:'left', fontFamily:"inherit",
+    lastMonth:'последния месец / last month', lastNMonths:n=>`последните ${n} месеца / last ${n} months`,
+    reportFor:'Отчет за'
+  },
+  he: {
+    name:'שם', period:'תקופה', hoursByDay:'שעות לפי יום',
+    date:'תאריך', in:'כניסה', out:'יציאה', hours:'שעות',
+    manual:'הזנה ידנית', payments:'תשלומים',
+    type:'סוג', amount:'סכום', event:'אירוע', timeline:'ציר זמן',
+    noPayments:'אין תשלומים בתקופה זו.',
+    totalHours:'סה"כ שעות', rate:'תעריף', totalEarned:'סה"כ הגיע',
+    paidWages:'שולם (שכר)', remaining:'נותר',
+    payTip:'טיפ', payAdj:'סגירת חוב', payNormal:'תשלום',
+    checkInWord:'כניסה', checkOutWord:'יציאה', dir:'rtl', align:'right', fontFamily:"'Heebo',sans-serif",
+    lastMonth:'החודש האחרון', lastNMonths:n=>`${n} החודשים האחרונים`,
+    reportFor:'דוח עבור'
+  }
+};
+
 // Printable weekly slip for an employee, in Bulgarian, so they can check their own hours/pay.
 function renderEmployeeSlip(empId, offset){
   const weekStart = periodStartAtOffset(offset);
-  buildAndShowSlip(empId, weekStart, addDays(weekStart,7), 'Седмичен отчет / Weekly report', ()=>renderEmployeeDetail(empId));
+  buildAndShowSlip(empId, weekStart, addDays(weekStart,7), 'Седмичен отчет / Weekly report', ()=>renderEmployeeDetail(empId), {lang:'bg', layout:'combined'});
 }
 
-function buildAndShowSlip(empId, rangeStart, rangeEndExcl, titleLine, backFn){
+function buildAndShowSlip(empId, rangeStart, rangeEndExcl, titleLine, backFn, opts){
+  opts = opts || {};
+  const L = SLIP_STRINGS[opts.lang || 'bg'];
+  const layout = opts.layout || 'combined';
   const emp = state.employees.find(e=>e.id===empId);
   const st = statsForRange(empId, rangeStart, rangeEndExcl);
   const shifts = [...st.shifts].sort((a,b)=>{
@@ -902,57 +961,80 @@ function buildAndShowSlip(empId, rangeStart, rangeEndExcl, titleLine, backFn){
     const db_ = b.date.toDate?b.date.toDate():new Date(b.date);
     return da - db_;
   });
-  const paymentTypeLabel = (p)=> p.isTip ? 'Бакшиш / Tip' : p.isAdjustment ? 'Закриване на дълг / Debt closure' : 'Заплащане / Payment';
+  const paymentTypeLabel = (p)=> p.isTip ? L.payTip : p.isAdjustment ? L.payAdj : L.payNormal;
+
+  let bodyHtml;
+  if(layout === 'separate'){
+    bodyHtml = `
+      <p><b>${L.hoursByDay}</b></p>
+      <table style="width:100%;">
+        <tr><th style="text-align:${L.align};">${L.date}</th><th style="text-align:${L.align};">${L.in}</th><th style="text-align:${L.align};">${L.out}</th><th style="text-align:${L.align};">${L.hours}</th></tr>
+        ${shifts.map(s=>{
+          if(s.manualTotalHours!=null){
+            return `<tr><td colspan="3">${L.manual}</td><td class="mono">${fmtHours(s.manualTotalHours)}</td></tr>`;
+          }
+          const inD = s.checkIn.toDate?s.checkIn.toDate():new Date(s.checkIn);
+          const outD = s.checkOut ? (s.checkOut.toDate?s.checkOut.toDate():new Date(s.checkOut)) : null;
+          return `<tr><td>${toInputDate(inD)}</td><td>${toInputTime(inD)}</td><td>${outD?toInputTime(outD):'—'}</td><td class="mono">${fmtHours(shiftDurationHours(s))}</td></tr>`;
+        }).join('')}
+      </table>
+      <div class="divider"></div>
+      <p><b>${L.payments}</b></p>
+      ${allPaymentsInRange.length ? `
+      <table style="width:100%;">
+        <tr><th style="text-align:${L.align};">${L.date}</th><th style="text-align:${L.align};">${L.type}</th><th style="text-align:${L.align};">${L.amount}</th></tr>
+        ${allPaymentsInRange.map(p=>{
+          const d = p.date.toDate?p.date.toDate():new Date(p.date);
+          return `<tr><td>${toInputDate(d)}</td><td>${paymentTypeLabel(p)}${p.note?` — ${p.note}`:''}</td><td class="mono">${money(p.amount)}</td></tr>`;
+        }).join('')}
+      </table>` : `<p class="muted">${L.noPayments}</p>`}
+    `;
+  } else {
+    // combined: everything merged into one chronological table
+    const rows = [];
+    shifts.forEach(s=>{
+      const d = shiftEffectiveDate(s);
+      if(s.manualTotalHours!=null){
+        rows.push({date:d, event:L.manual, hours:fmtHours(s.manualTotalHours), amount:''});
+      } else {
+        const inD = s.checkIn.toDate?s.checkIn.toDate():new Date(s.checkIn);
+        const outD = s.checkOut ? (s.checkOut.toDate?s.checkOut.toDate():new Date(s.checkOut)) : null;
+        const ev = `${L.checkInWord} ${toInputTime(inD)}${outD?` → ${L.checkOutWord} ${toInputTime(outD)}`:''}`;
+        rows.push({date:d, event:ev, hours: outD?fmtHours(shiftDurationHours(s)):'—', amount:''});
+      }
+    });
+    allPaymentsInRange.forEach(p=>{
+      const d = p.date.toDate?p.date.toDate():new Date(p.date);
+      rows.push({date:d, event: paymentTypeLabel(p)+(p.note?` — ${p.note}`:''), hours:'', amount:money(p.amount)});
+    });
+    rows.sort((a,b)=>a.date-b.date);
+    bodyHtml = `
+      <p><b>${L.timeline}</b></p>
+      <table style="width:100%;">
+        <tr><th style="text-align:${L.align};">${L.date}</th><th style="text-align:${L.align};">${L.event}</th><th style="text-align:${L.align};">${L.hours}</th><th style="text-align:${L.align};">${L.amount}</th></tr>
+        ${rows.map(r=>`<tr><td>${toInputDate(r.date)}</td><td>${r.event}</td><td class="mono">${r.hours}</td><td class="mono">${r.amount}</td></tr>`).join('')}
+      </table>
+    `;
+  }
 
   root.innerHTML = `
     <div class="card no-print">
       <button class="btn btn-ghost btn-sm" id="btn-back">← חזרה</button>
       <button class="btn btn-brass btn-sm" id="btn-print" style="margin-right:8px;">הדפסה / שמירה כ-PDF</button>
     </div>
-    <div class="card" dir="ltr" style="text-align:left;">
-      <h2 style="font-family:'Heebo',sans-serif;">${titleLine}</h2>
+    <div class="card" dir="${L.dir}" style="text-align:${L.align};">
+      <h2 style="font-family:${L.fontFamily};">${titleLine}</h2>
       <div class="divider"></div>
-      <p><b>Име / Name:</b> ${emp.name}</p>
-      <p><b>Период / Period:</b> ${toInputDate(rangeStart)} – ${toInputDate(addDays(rangeEndExcl,-1))}</p>
+      <p><b>${L.name}:</b> ${emp.name}</p>
+      <p><b>${L.period}:</b> ${toInputDate(rangeStart)} – ${toInputDate(addDays(rangeEndExcl,-1))}</p>
       <div class="divider"></div>
-      <p><b>Часове по дни / Hours by day</b></p>
-      <table style="width:100%;">
-        <tr><th style="text-align:left;">Дата / Date</th><th style="text-align:left;">Вход / In</th><th style="text-align:left;">Изход / Out</th><th style="text-align:left;">Часове / Hours</th></tr>
-        ${shifts.map(s=>{
-          if(s.manualTotalHours!=null){
-            return `<tr><td colspan="3">Ръчно въведено / Manual entry</td><td class="mono">${fmtHours(s.manualTotalHours)}</td></tr>`;
-          }
-          const inD = s.checkIn.toDate?s.checkIn.toDate():new Date(s.checkIn);
-          const outD = s.checkOut ? (s.checkOut.toDate?s.checkOut.toDate():new Date(s.checkOut)) : null;
-          return `<tr>
-            <td>${toInputDate(inD)}</td>
-            <td>${toInputTime(inD)}</td>
-            <td>${outD?toInputTime(outD):'—'}</td>
-            <td class="mono">${fmtHours(shiftDurationHours(s))}</td>
-          </tr>`;
-        }).join('')}
-      </table>
+      ${bodyHtml}
       <div class="divider"></div>
-      <p><b>Плащания / Payments</b></p>
-      ${allPaymentsInRange.length ? `
-      <table style="width:100%;">
-        <tr><th style="text-align:left;">Дата / Date</th><th style="text-align:left;">Вид / Type</th><th style="text-align:left;">Сума / Amount</th></tr>
-        ${allPaymentsInRange.map(p=>{
-          const d = p.date.toDate?p.date.toDate():new Date(p.date);
-          return `<tr>
-            <td>${toInputDate(d)}</td>
-            <td>${paymentTypeLabel(p)}${p.note?` — ${p.note}`:''}</td>
-            <td class="mono">${money(p.amount)}</td>
-          </tr>`;
-        }).join('')}
-      </table>
-      ` : `<p class="muted">Няма плащания през този период. / No payments in this period.</p>`}
-      <div class="divider"></div>
-      <div class="row between"><span>Общо часове / Total hours</span><b class="mono">${fmtHours(st.hours)}</b></div>
-      <div class="row between"><span>Ставка / Rate</span><b class="mono">${money(emp.hourlyRate)}/ч.</b></div>
-      <div class="row between"><span>Общо заработено / Total earned</span><b class="mono">${money(st.earned)}</b></div>
-      <div class="row between"><span>Платено (заплата) / Paid (wages)</span><b class="mono">${money(st.paid)}</b></div>
-      <div class="row between"><b>Остатък / Remaining</b><b class="mono">${money(st.earned-st.paid)}</b></div>
+      <div class="row between"><span>${L.totalHours}</span><b class="mono">${fmtHours(st.hours)}</b></div>
+      <div class="row between"><span>${L.rate}</span><b class="mono">${money(emp.hourlyRate)}${opts.lang==='he'?' / שעה':' / ч.'}</b></div>
+      <div class="row between"><span>${L.totalEarned}</span><b class="mono">${money(st.earned)}</b></div>
+      <div class="row between"><span>${L.paidWages}</span><b class="mono">${money(st.paid)}</b></div>
+      <div class="row between"><b>${L.remaining}</b><b class="mono">${money(st.earned-st.paid)}</b></div>
     </div>
   `;
   document.getElementById('btn-back').onclick = backFn;
@@ -964,6 +1046,8 @@ function renderPayslipReport(){
   const active = state.employees.filter(e=>e.active!==false);
   if(!state.slipEmployeeId && active.length) state.slipEmployeeId = active[0].id;
   if(!state.slipMonths) state.slipMonths = 1;
+  if(!state.slipLayout) state.slipLayout = 'combined';
+  if(!state.slipLang) state.slipLang = 'bg';
 
   const empOptions = active.map(e=>`<option value="${e.id}" ${state.slipEmployeeId===e.id?'selected':''}>${displayName(e)}</option>`).join('');
 
@@ -978,18 +1062,31 @@ function renderPayslipReport(){
         <option value="3" ${state.slipMonths===3?'selected':''}>3 חודשים אחרונים</option>
         <option value="6" ${state.slipMonths===6?'selected':''}>6 חודשים אחרונים</option>
       </select>
+      <label>פריסה</label>
+      <select id="f-slip-layout">
+        <option value="combined" ${state.slipLayout==='combined'?'selected':''}>משולב — הכל יחד לפי תאריך (שעות + תשלומים)</option>
+        <option value="separate" ${state.slipLayout==='separate'?'selected':''}>נפרד — טבלת שעות וטבלת תשלומים בנפרד</option>
+      </select>
+      <label>שפת הדוח</label>
+      <select id="f-slip-lang">
+        <option value="bg" ${state.slipLang==='bg'?'selected':''}>בולגרית / אנגלית (לעובד)</option>
+        <option value="he" ${state.slipLang==='he'?'selected':''}>עברית (בשבילך)</option>
+      </select>
       <button class="btn btn-brass" id="btn-generate" style="margin-top:12px;">הפק דוח פירוט</button>
     </div>
   `;
   bindReportModeTabs();
   document.getElementById('f-slip-emp').onchange = (e)=>{ state.slipEmployeeId = e.target.value; };
   document.getElementById('f-slip-months').onchange = (e)=>{ state.slipMonths = parseInt(e.target.value,10); };
+  document.getElementById('f-slip-layout').onchange = (e)=>{ state.slipLayout = e.target.value; };
+  document.getElementById('f-slip-lang').onchange = (e)=>{ state.slipLang = e.target.value; };
   document.getElementById('btn-generate').onclick = ()=>{
     if(!state.slipEmployeeId){ toast('אין עובדים פעילים'); return; }
     const end = startOfDay(new Date());
     const start = addMonths(end, -state.slipMonths);
-    const monthsLabel = state.slipMonths===1 ? 'последния месец / last month' : `последните ${state.slipMonths} месеца / last ${state.slipMonths} months`;
-    buildAndShowSlip(state.slipEmployeeId, start, addDays(end,1), `Отчет за ${monthsLabel}`, renderReports);
+    const L = SLIP_STRINGS[state.slipLang];
+    const monthsLabel = state.slipMonths===1 ? L.lastMonth : L.lastNMonths(state.slipMonths);
+    buildAndShowSlip(state.slipEmployeeId, start, addDays(end,1), `${L.reportFor} ${monthsLabel}`, renderReports, {lang: state.slipLang, layout: state.slipLayout});
   };
 }
 
@@ -1770,6 +1867,32 @@ function renderQr(){
 }
 
 // ---------- settings ----------
+function renderTabOrderList(){
+  const cont = document.getElementById('tab-order-list');
+  const order = orderedTabs();
+  cont.innerHTML = order.map(([id,label], i)=>`
+    <div class="row between" style="padding:4px 0;">
+      <span style="font-size:13px;">${label}</span>
+      <span>
+        <button class="btn btn-ghost btn-sm" data-up="${id}" ${i===0?'disabled style="opacity:.3"':''}>▲</button>
+        <button class="btn btn-ghost btn-sm" data-down="${id}" ${i===order.length-1?'disabled style="opacity:.3"':''}>▼</button>
+      </span>
+    </div>
+  `).join('');
+  cont.querySelectorAll('[data-up]').forEach(b=>b.onclick=()=>moveTab(b.dataset.up, -1));
+  cont.querySelectorAll('[data-down]').forEach(b=>b.onclick=()=>moveTab(b.dataset.down, 1));
+}
+async function moveTab(id, dir){
+  const order = orderedTabs().map(([tid])=>tid);
+  const i = order.indexOf(id);
+  const j = i + dir;
+  if(j < 0 || j >= order.length) return;
+  [order[i], order[j]] = [order[j], order[i]];
+  state.config.tabOrder = order;
+  await db.collection('config').doc('main').update({ tabOrder: order });
+  renderApp();
+}
+
 function renderSettings(){
   const biz = state.config.businessLocation;
   const base = location.href.replace(/admin\.html.*$/, '');
@@ -1780,6 +1903,11 @@ function renderSettings(){
       <p style="font-size:13px;">📱 <b>עובדי טלפון:</b><br><span class="mono" style="word-break:break-all;">${base}index.html</span></p>
       <p style="font-size:13px;">🖥️ <b>עמדת כניסה (מחשב):</b><br><span class="mono" style="word-break:break-all;">${base}kiosk.html</span></p>
       <p style="font-size:13px;">🔑 <b>ניהול (המסך הזה):</b><br><span class="mono" style="word-break:break-all;">${base}admin.html</span></p>
+    </div>
+    <div class="card">
+      <h2 style="font-size:16px;">סדר הלשוניות</h2>
+      <p class="muted" style="font-size:12px;">חצים כדי לשנות את הסדר שבו הלשוניות מופיעות למעלה.</p>
+      <div id="tab-order-list"></div>
     </div>
     <div class="card">
       <h2>שינוי קוד גישה</h2>
@@ -1825,6 +1953,7 @@ function renderSettings(){
       <button class="btn btn-ghost" id="btn-logout-admin">יציאה מהמסך המנהל</button>
     </div>
   `;
+  renderTabOrderList();
   document.getElementById('btn-save-code').onclick = async ()=>{
     const v = document.getElementById('f-newcode').value.trim();
     if(!v){ toast('נא להזין קוד חדש'); return; }
