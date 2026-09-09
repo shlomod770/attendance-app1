@@ -6,8 +6,12 @@
 <title>Работно време — Каса</title>
 <link rel="stylesheet" href="style.css">
 <style>
+  html, body{ height:100%; }
   body{ background:var(--ink); }
-  #app{ max-width:720px; margin:0 auto; padding:24px 16px; }
+  #app{ max-width:720px; margin:0 auto; padding:24px 16px; min-height:100vh; display:flex; flex-direction:column; }
+  #app h1{ color:var(--paper); text-align:center; margin-bottom:8px; }
+  #root{ flex:1; display:flex; flex-direction:column; }
+  #root.center-content{ justify-content:center; }
   .kiosk-btn{
     display:block; width:100%; padding:22px; margin-bottom:12px;
     background:#fff; border:1px solid var(--line); border-radius:16px;
@@ -15,7 +19,17 @@
   }
   .kiosk-btn:active{ background:var(--paper-2); }
   video, canvas{ width:100%; border-radius:16px; background:#000; }
-  #app h1{ color:var(--paper); text-align:center; }
+  .kiosk-back-btn{
+    background:rgba(255,255,255,.12); color:#fff; border:1px solid rgba(255,255,255,.3);
+    border-radius:10px; padding:8px 16px; font-size:14px; cursor:pointer;
+  }
+  .kiosk-back-btn:active{ background:rgba(255,255,255,.22); }
+  .picker-tile{
+    background:#fff; border:1px solid var(--line); border-radius:12px;
+    padding:8px; cursor:pointer; text-align:center;
+  }
+  .picker-tile img{ width:100%; aspect-ratio:1; object-fit:cover; border-radius:8px; margin-bottom:6px; }
+  .picker-tile .pname{ font-size:15px; font-weight:700; color:var(--ink); }
 </style>
 </head>
 <body>
@@ -27,6 +41,6 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
 <script src="firebase-config.js"></script>
-<script src="app-kiosk.js?v=2"></script>
+<script src="app-kiosk.js?v=3"></script>
 </body>
 </html>
