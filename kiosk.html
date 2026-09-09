@@ -19,6 +19,22 @@
   }
   .kiosk-btn:active{ background:var(--paper-2); }
   video, canvas{ width:100%; border-radius:16px; background:#000; }
+  .kiosk-primary-btn{
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    width:100%; aspect-ratio:1.15; max-height:52vh;
+    background:var(--ink); color:#fff; border:none; border-radius:24px;
+    font-size:30px; font-weight:800; text-align:center; cursor:pointer;
+  }
+  .kiosk-primary-btn:active{ background:var(--ink-2); }
+  .kiosk-caption{ color:var(--paper); opacity:.75; text-align:center; font-size:14px; margin-top:16px; line-height:1.6; max-width:440px; margin-left:auto; margin-right:auto; }
+  .kiosk-footer-bar{
+    margin-top:auto; padding-top:24px; text-align:center;
+  }
+  .kiosk-footer-link{
+    background:transparent; border:1px solid rgba(255,255,255,.25); color:rgba(255,255,255,.75);
+    border-radius:100px; padding:10px 18px; font-size:13px; cursor:pointer;
+  }
+  .kiosk-footer-link:active{ background:rgba(255,255,255,.1); }
   .kiosk-back-btn{
     background:rgba(255,255,255,.12); color:#fff; border:1px solid rgba(255,255,255,.3);
     border-radius:10px; padding:8px 16px; font-size:14px; cursor:pointer;
@@ -41,6 +57,6 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
 <script src="firebase-config.js"></script>
-<script src="app-kiosk.js?v=3"></script>
+<script src="app-kiosk.js?v=5"></script>
 </body>
 </html>
