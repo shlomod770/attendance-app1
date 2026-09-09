@@ -262,17 +262,7 @@ async function processScan(){
     const hoursSince = (now - checkIn) / 3600000;
 
     if(hoursSince > 17){
-      await db.collection('shifts').doc(openDoc.id).update({ needsReview: true });
-      await db.collection('shifts').add({
-        employeeId: currentEmployee.id,
-        checkIn: firebase.firestore.FieldValue.serverTimestamp(),
-        checkInLoc: loc,
-        checkOut: null,
-        needsReview: false,
-        note: '',
-        source: 'qr'
-      });
-      showResult(true, `Час: ${fmtTime(now)}`);
+      showLongShiftChoice(openDoc, checkIn, now, loc);
       return;
     }
 
@@ -294,6 +284,51 @@ async function processScan(){
     toast('Възникна грешка. Опитайте отново.');
     renderStageButton();
   }
+}
+
+// It's genuinely ambiguous whether this scan means "I'm finally checking out of
+// that very long shift" or "I forgot to check out yesterday and this is a brand
+// new shift" — only the employee actually knows. So we ask, instead of guessing.
+function showLongShiftChoice(openDoc, checkIn, now, loc){
+  const stage = document.getElementById('stage');
+  const hrs = Math.floor((now - checkIn) / 3600000);
+  stage.innerHTML = `
+    <div class="card center">
+      <h2 style="font-size:20px;">Мина много време</h2>
+      <p class="muted">Влязохте на ${fmtDate(checkIn)} в ${fmtTime(checkIn)} (преди около ${hrs} часа).</p>
+      <p>Това ли е изходът от онази смяна, или започвате нова смяна сега?</p>
+      <button class="btn btn-primary" id="btn-choice-checkout" style="margin-top:10px;">Това е изход от онази смяна</button>
+      <button class="btn btn-ghost" id="btn-choice-newshift" style="margin-top:8px;">Започвам нова смяна сега</button>
+    </div>
+  `;
+  document.getElementById('btn-choice-checkout').onclick = async ()=>{
+    await db.collection('shifts').doc(openDoc.id).update({
+      checkOut: firebase.firestore.FieldValue.serverTimestamp(),
+      checkOutLoc: loc,
+      needsReview: true // still worth a manager glance since it's unusually long
+    });
+    const durationH = (now - checkIn) / 3600000;
+    const h = Math.floor(durationH), m = Math.round((durationH - h) * 60);
+    const dayNote = sameDay(checkIn, now) ? '' : ` (${fmtDate(now)})`;
+    showResult(false, `
+      Вход: ${fmtTime(checkIn)}<br>
+      Изход: ${fmtTime(now)}${dayNote}<br>
+      <b>Общо часове: ${h} ч ${m} мин</b>
+    `);
+  };
+  document.getElementById('btn-choice-newshift').onclick = async ()=>{
+    await db.collection('shifts').doc(openDoc.id).update({ needsReview: true });
+    await db.collection('shifts').add({
+      employeeId: currentEmployee.id,
+      checkIn: firebase.firestore.FieldValue.serverTimestamp(),
+      checkInLoc: loc,
+      checkOut: null,
+      needsReview: false,
+      note: '',
+      source: 'qr'
+    });
+    showResult(true, `Час: ${fmtTime(now)}`);
+  };
 }
 
 function showResult(isCheckIn, bodyHtml){
