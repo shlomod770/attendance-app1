@@ -55,6 +55,7 @@ async function loadKioskEmployees(){
 // ---- Main screen: clean, just two big buttons. No name list shown here. ----
 function renderMain(){
   armIdleTimer();
+  root.classList.add('center-content');
   root.innerHTML = `
     <button class="kiosk-btn" id="btn-shift" style="padding:34px;font-size:26px;background:var(--ink);color:#fff;">Начало / Край на смяна</button>
     <div style="height:40px;"></div>
@@ -67,6 +68,7 @@ function renderMain(){
 // ---- Employee picker grid: fetched fresh only when opened, not on every idle reset ----
 async function renderPicker(){
   armIdleTimer();
+  root.classList.remove('center-content');
   root.innerHTML = `<div class="card center"><p class="muted">Зареждане...</p></div>`;
   await loadKioskEmployees();
   if(!kioskEmployees.length){
@@ -75,17 +77,17 @@ async function renderPicker(){
     return;
   }
   root.innerHTML = `
-    <div class="row between no-print" style="margin-bottom:10px;">
-      <button class="btn btn-ghost btn-sm" id="btn-back">← Назад</button>
+    <div style="margin-bottom:10px;">
+      <button class="kiosk-back-btn" id="btn-back">← Назад</button>
     </div>
-    <div id="grid" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;"></div>
+    <div id="grid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;"></div>
   `;
   document.getElementById('btn-back').onclick = renderMain;
   const grid = document.getElementById('grid');
   grid.innerHTML = kioskEmployees.map(e=>`
-    <button class="kiosk-btn" data-emp="${e.id}" style="padding:14px;font-size:16px;">
-      ${e.profilePhoto?`<img src="${e.profilePhoto}" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:10px;margin-bottom:8px;">`:''}
-      ${e.name}
+    <button class="picker-tile" data-emp="${e.id}">
+      ${e.profilePhoto?`<img src="${e.profilePhoto}">`:'<div style="width:100%;aspect-ratio:1;background:var(--paper-2);border-radius:8px;margin-bottom:6px;"></div>'}
+      <div class="pname">${e.name}</div>
     </button>
   `).join('');
   grid.querySelectorAll('[data-emp]').forEach(b=>b.onclick=()=>{
@@ -118,6 +120,7 @@ function renderConfirm(emp){
 
 function renderNewEmployeeForm(){
   armIdleTimer();
+  root.classList.remove('center-content');
   root.innerHTML = `
     <div class="card">
       <h2 style="font-size:22px;">Нов служител</h2>
