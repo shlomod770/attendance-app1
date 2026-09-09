@@ -110,7 +110,7 @@ function shiftExceptionReasons(s){
   const reasons = [];
   if(s.manualTotalHours != null) return reasons; // manual entries have no location/time to flag
 
-  if(s.needsReview) reasons.push('משמרת ישנה שלא נסגרה (מעל 17 שעות) — נפתחה משמרת חדשה');
+  if(s.needsReview) reasons.push('משמרת ארוכה/חריגה — כדאי לבדוק שהשעות נכונות (מסומן ע"י העובד או אוטומטית)');
 
   if(s.checkIn && !s.checkOut){
     const inD = s.checkIn.toDate ? s.checkIn.toDate() : new Date(s.checkIn);
@@ -411,7 +411,7 @@ function renderPayroll(){
   const weekEnd = addDays(weekStart,7);
   const active = state.employees.filter(e=>e.active!==false);
 
-  const rows = active.map(e=>{
+  const allRows = active.map(e=>{
     const st = statsForRange(e.id, weekStart, weekEnd);
     const remaining = Math.max(0, st.earned - st.paid);
     // Cumulative debt frozen at the END of this specific week — includes any older
@@ -420,6 +420,9 @@ function renderPayroll(){
     const cumulative = Math.max(0, statsUpTo(e.id, weekEnd).remaining);
     return { emp:e, ...st, remaining, cumulative };
   });
+  // Only show people who actually need to be paid something — no point cluttering
+  // this screen with employees who have zero balance for this week and no old debt.
+  const rows = allRows.filter(r => r.remaining > 0.005 || r.cumulative > 0.005);
   const totalThisWeek = rows.reduce((s,r)=>s+r.remaining,0);
   const totalCumulative = rows.reduce((s,r)=>s+r.cumulative,0);
 
@@ -446,6 +449,10 @@ function renderPayroll(){
   document.getElementById('btn-next').onclick = ()=>{ if(state.payrollOffset>0){ state.payrollOffset--; renderPayroll(); } };
 
   const cont = document.getElementById('payroll-rows');
+  if(!rows.length){
+    cont.innerHTML = '<div class="card"><p class="muted">אין כרגע אף אחד שצריך לשלם לו — כל היתרות בשבוע הזה על אפס. 🎉</p></div>';
+    return;
+  }
   cont.innerHTML = rows.map(r=>`
     <div class="card">
       <div class="row between"><b>${displayName(r.emp)}</b><span class="mono">${fmtHours(r.hours)} ש'</span></div>
