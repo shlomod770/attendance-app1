@@ -95,15 +95,12 @@ async function doLogin(){
   if(data.active === false){ errEl.textContent = 'Профилът е деактивиран. Обърнете се към управителя.'; return; }
 
   let pinOk = false;
-  if(data.pinHash){
-    pinOk = (await sha256(pin)) === data.pinHash;
-  } else if(data.pin != null){
-    // legacy plaintext PIN — accept once, then upgrade it to a hash so it's never stored in the open again
+  if(data.pin != null){
     pinOk = String(data.pin) === String(pin);
-    if(pinOk){
-      const hash = await sha256(pin);
-      await db.collection('employees').doc(doc.id).update({ pinHash: hash, pin: firebase.firestore.FieldValue.delete() });
-    }
+  } else if(data.pinHash){
+    // account was set up during the brief period codes were hashed — still works to log in,
+    // but the admin won't be able to see this code until they set a new one for this employee.
+    pinOk = (await sha256(pin)) === data.pinHash;
   }
   if(!pinOk){ errEl.textContent = 'Грешно потребителско име или код.'; return; }
 
@@ -232,6 +229,11 @@ async function processScan(){
     const now = new Date();
     const loc = await getLocation();
 
+    if(currentEmployee.shiftType === 'fixed'){
+      await processFixedShiftScan(now, loc);
+      return;
+    }
+
     // Fetch all shifts for this employee (no composite index required),
     // then find the open one (if any) here in the browser.
     const allSnap = await db.collection('shifts')
@@ -342,6 +344,92 @@ function showResult(isCheckIn, bodyHtml){
     </div>
   `;
   document.getElementById('btn-ok').onclick = renderStageButton;
+}
+
+// ---------------- fixed-shift employees ----------------
+// Pay is based on the pre-defined schedule (e.g. 15:00–20:00), not the actual
+// scan time — but the real scan times are still recorded for tracking.
+
+function computeScheduledTimes(emp, baseDate){
+  const [sh,sm] = emp.fixedShiftStart.split(':').map(Number);
+  const [eh,em] = emp.fixedShiftEnd.split(':').map(Number);
+  const start = new Date(baseDate); start.setHours(sh,sm,0,0);
+  let end = new Date(baseDate); end.setHours(eh,em,0,0);
+  if(end <= start) end.setDate(end.getDate()+1); // shift crosses midnight
+  return { start, end };
+}
+
+async function processFixedShiftScan(now, loc){
+  const stage = document.getElementById('stage');
+  const label = `${currentEmployee.fixedShiftStart}–${currentEmployee.fixedShiftEnd}`;
+
+  const allSnap = await db.collection('shifts')
+    .where('employeeId','==', currentEmployee.id)
+    .get();
+  const openDocs = allSnap.docs
+    .filter(d => d.data().isFixedShift && !d.data().checkOut)
+    .sort((a,b) => b.data().checkIn.toMillis() - a.data().checkIn.toMillis());
+
+  if(openDocs.length === 0){
+    stage.innerHTML = `
+      <div class="card center">
+        <h2 style="font-size:20px;">Искате ли да започнете смяна ${label}?</h2>
+        <div class="row" style="margin-top:14px;">
+          <button class="btn btn-primary" id="btn-yes">Да</button>
+          <button class="btn btn-ghost" id="btn-no">Не</button>
+        </div>
+      </div>
+    `;
+    document.getElementById('btn-no').onclick = renderStageButton;
+    document.getElementById('btn-yes').onclick = async ()=>{
+      const { start, end } = computeScheduledTimes(currentEmployee, now);
+      await db.collection('shifts').add({
+        employeeId: currentEmployee.id,
+        checkIn: firebase.firestore.FieldValue.serverTimestamp(),
+        checkInLoc: loc,
+        checkOut: null,
+        isFixedShift: true,
+        scheduledStart: firebase.firestore.Timestamp.fromDate(start),
+        scheduledEnd: firebase.firestore.Timestamp.fromDate(end),
+        needsReview: false,
+        note: '',
+        source: 'qr'
+      });
+      showResult(true, `Смяна ${label}<br>Час на влизане: ${fmtTime(now)}`);
+    };
+    return;
+  }
+
+  const openDoc = openDocs[0];
+  stage.innerHTML = `
+    <div class="card center">
+      <h2 style="font-size:20px;">Приключихте ли смяна ${label}?</h2>
+      <div class="row" style="margin-top:14px;">
+        <button class="btn btn-primary" id="btn-yes">Да</button>
+        <button class="btn btn-ghost" id="btn-no">Не</button>
+      </div>
+    </div>
+  `;
+  document.getElementById('btn-no').onclick = renderStageButton;
+  document.getElementById('btn-yes').onclick = ()=>{
+    stage.innerHTML = `
+      <div class="card center">
+        <p>Ако сте работили извънредно в кухнята след ${currentEmployee.fixedShiftEnd}, въведете допълнителните минути (по избор):</p>
+        <input id="f-overtime" type="number" min="0" step="5" placeholder="0" style="text-align:center;">
+        <button class="btn btn-primary" id="btn-confirm-out" style="margin-top:14px;">Потвърди</button>
+      </div>
+    `;
+    document.getElementById('btn-confirm-out').onclick = async ()=>{
+      const overtimeMinutes = parseInt(document.getElementById('f-overtime').value, 10) || 0;
+      await db.collection('shifts').doc(openDoc.id).update({
+        checkOut: firebase.firestore.FieldValue.serverTimestamp(),
+        checkOutLoc: loc,
+        overtimeMinutes
+      });
+      const otText = overtimeMinutes ? `<br>Извънреден труд: ${overtimeMinutes} мин.` : '';
+      showResult(false, `Смяна ${label}<br>Час на излизане: ${fmtTime(now)}${otText}`);
+    };
+  };
 }
 
 init();
