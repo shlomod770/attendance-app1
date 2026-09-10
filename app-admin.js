@@ -117,7 +117,7 @@ function shiftExceptionReasons(s){
     const hrs = (new Date() - inD) / 3600000;
     if(hrs > LONG_SHIFT_HOURS && !s.needsReview) reasons.push(`משמרת פתוחה כבר ${fmtHours(hrs)} שעות`);
   }
-  if(s.checkIn && s.checkOut){
+  if(s.checkIn && s.checkOut && !s.isFixedShift){
     const hrs = shiftDurationHours(s);
     if(hrs > LONG_SHIFT_HOURS) reasons.push(`משמרת ארוכה מהרגיל — ${fmtHours(hrs)} שעות`);
   }
@@ -141,6 +141,14 @@ function shiftExceptionReasons(s){
 // ---------- shift helpers ----------
 function shiftDurationHours(s){
   if(s.manualTotalHours != null) return s.manualTotalHours;
+  if(s.isFixedShift){
+    if(!s.checkOut) return 0; // not finished yet
+    if(!s.scheduledStart || !s.scheduledEnd) return 0;
+    const schedStart = s.scheduledStart.toDate ? s.scheduledStart.toDate() : new Date(s.scheduledStart);
+    const schedEnd = s.scheduledEnd.toDate ? s.scheduledEnd.toDate() : new Date(s.scheduledEnd);
+    const scheduledHours = Math.max(0, (schedEnd - schedStart) / 3600000);
+    return scheduledHours + (s.overtimeMinutes || 0) / 60;
+  }
   if(!s.checkIn || !s.checkOut) return 0;
   const inD = s.checkIn.toDate ? s.checkIn.toDate() : new Date(s.checkIn);
   const outD = s.checkOut.toDate ? s.checkOut.toDate() : new Date(s.checkOut);
@@ -409,7 +417,8 @@ function renderPayroll(){
   if(state.payrollOffset === undefined) state.payrollOffset = 1; // default: last completed week
   const weekStart = periodStartAtOffset(state.payrollOffset);
   const weekEnd = addDays(weekStart,7);
-  const active = state.employees.filter(e=>e.active!==false);
+  const active = state.employees.filter(e=>e.active!==false && e.payCycle!=='flexible');
+  const flexibleEmployees = state.employees.filter(e=>e.active!==false && e.payCycle==='flexible');
 
   const allRows = active.map(e=>{
     const st = statsForRange(e.id, weekStart, weekEnd);
@@ -444,9 +453,35 @@ function renderPayroll(){
       <button class="btn btn-brass" id="btn-pay-all" style="margin-top:10px;">שלם לכולם לפי "סכום לתשלום" למטה</button>
     </div>
     <div id="payroll-rows"></div>
+    ${flexibleEmployees.length ? `
+    <div class="card" style="margin-top:20px;">
+      <h2 style="font-size:16px;">עובדים בתשלום גמיש (לא שבועי)</h2>
+      <p class="muted" style="font-size:12px;">עובדים אלה לא נספרים לפי שבוע — התשלום להם נקבע ידנית מתי שנוח (דו-שבועי, חודשי וכו'). היתרה שלהם היא תמיד "סך הכל" ולא קשורה לשבוע ספציפי.</p>
+    </div>
+    <div id="flex-pay-rows"></div>
+    ` : ''}
   `;
   document.getElementById('btn-prev').onclick = ()=>{ state.payrollOffset++; renderPayroll(); };
   document.getElementById('btn-next').onclick = ()=>{ if(state.payrollOffset>0){ state.payrollOffset--; renderPayroll(); } };
+
+  if(flexibleEmployees.length){
+    const flexCont = document.getElementById('flex-pay-rows');
+    flexCont.innerHTML = flexibleEmployees.map(e=>{
+      const life = employeeLifetimeStats(e.id);
+      return `<div class="card">
+        <div class="row between"><b>${displayName(e)}</b><span class="mono">${fmtHours(life.hours)} ש' סה"כ</span></div>
+        <div class="row between"><b>סה"כ נותר לשלם</b><b class="mono">${money(life.remaining)}</b></div>
+        <div class="row" style="margin-top:10px;">
+          <button class="btn btn-primary btn-sm" data-flex-pay="${e.id}">רישום תשלום</button>
+          <button class="btn btn-ghost btn-sm" data-flex-open="${e.id}">פתח כרטיס עובד</button>
+        </div>
+      </div>`;
+    }).join('');
+    flexCont.querySelectorAll('[data-flex-pay]').forEach(b=>b.onclick=()=>openPaymentForm(b.dataset.flexPay, null));
+    flexCont.querySelectorAll('[data-flex-open]').forEach(b=>b.onclick=()=>{
+      state.tab='employees'; state.detailEmployeeId = b.dataset.flexOpen; renderApp();
+    });
+  }
 
   const cont = document.getElementById('payroll-rows');
   if(!rows.length){
@@ -635,7 +670,24 @@ function openEmployeeForm(empId){
       <label>שם בעברית (לשימוש שלך בלבד, לא מוצג לעובד)</label><input id="f-namehe" value="${emp?(emp.nameHe||''):''}">
       <div id="phone-fields">
         <label>שם משתמש (לכניסה)</label><input id="f-username" value="${emp?(emp.username||''):''}">
-        <label>קוד אישי${emp?' (השאירו ריק כדי לא לשנות)':''}</label><input id="f-pin" placeholder="${emp?'••••':''}">
+        <label>קוד אישי</label><input id="f-pin" value="${emp&&emp.pin?emp.pin:''}" placeholder="${emp&&!emp.pin?'לא ידוע — הקישו קוד חדש כדי לקבוע אחד גלוי':''}">
+        ${emp&&!emp.pin&&emp.pinHash?'<p class="muted" style="font-size:12px;">לעובד הזה נקבע קוד לפני השדרוג ולכן הוא לא גלוי כאן. כדי לראות/לתת לו קוד — הקישו קוד חדש כאן ושמרו.</p>':''}
+        <label>סוג משמרת</label>
+        <select id="f-shifttype">
+          <option value="flexible" ${(!emp||emp.shiftType!=='fixed')?'selected':''}>לפי שעות סריקה בפועל (רגיל)</option>
+          <option value="fixed" ${emp&&emp.shiftType==='fixed'?'selected':''}>משמרת קבועה (תשלום לפי שעות מוגדרות מראש)</option>
+        </select>
+        <div id="fixed-shift-fields" class="row">
+          <div style="flex:1;">
+            <label>שעת התחלת משמרת</label>
+            <input id="f-fixed-start" type="time" value="${emp&&emp.fixedShiftStart?emp.fixedShiftStart:'15:00'}">
+          </div>
+          <div style="flex:1;">
+            <label>שעת סיום משמרת</label>
+            <input id="f-fixed-end" type="time" value="${emp&&emp.fixedShiftEnd?emp.fixedShiftEnd:'20:00'}">
+          </div>
+        </div>
+        <p class="muted" style="font-size:12px;">בעובד עם משמרת קבועה, התשלום מחושב תמיד לפי השעות שהוגדרו כאן, לא לפי השעה שבה הוא בפועל סרק — אבל שעות הסריקה בפועל עדיין נשמרות ומוצגות לצורך מעקב.</p>
       </div>
       <div id="kiosk-fields">
         <label>סוג העסקה</label>
@@ -645,6 +697,11 @@ function openEmployeeForm(empId){
         </select>
       </div>
       <label>שכר לשעה (€)</label><input id="f-rate" type="number" step="0.01" value="${emp?emp.hourlyRate:''}">
+      <label>תדירות תשלום</label>
+      <select id="f-paycycle">
+        <option value="weekly" ${(!emp||emp.payCycle!=='flexible')?'selected':''}>שבועי (מופיע ב"סגירת שבוע")</option>
+        <option value="flexible" ${emp&&emp.payCycle==='flexible'?'selected':''}>גמיש — דו-שבועי / חודשי / לא קבוע</option>
+      </select>
       <label>תמונת פרופיל (אופציונלי)</label>
       <input id="f-photo" type="file" accept="image/*">
       <div id="photo-preview" style="margin-top:8px;">${pendingPhoto?`<img src="${pendingPhoto}" style="width:80px;height:80px;object-fit:cover;border-radius:10px;">`:''}</div>
@@ -656,13 +713,19 @@ function openEmployeeForm(empId){
   `;
   const phoneFields = document.getElementById('phone-fields');
   const kioskFields = document.getElementById('kiosk-fields');
+  const fixedShiftFields = document.getElementById('fixed-shift-fields');
   const syncTypeUi = ()=>{
     const isKiosk = document.getElementById('f-worktype').value==='kiosk';
     phoneFields.style.display = isKiosk ? 'none' : '';
     kioskFields.style.display = isKiosk ? '' : 'none';
   };
+  const syncShiftTypeUi = ()=>{
+    fixedShiftFields.style.display = document.getElementById('f-shifttype').value==='fixed' ? '' : 'none';
+  };
   document.getElementById('f-worktype').onchange = syncTypeUi;
+  document.getElementById('f-shifttype').onchange = syncShiftTypeUi;
   syncTypeUi();
+  syncShiftTypeUi();
 
   document.getElementById('f-photo').onchange = (e)=>{
     const file = e.target.files[0];
@@ -699,21 +762,31 @@ function openEmployeeForm(empId){
       nameHe: document.getElementById('f-namehe').value.trim(),
       username: wt==='kiosk' ? (emp&&emp.username ? emp.username : '') : document.getElementById('f-username').value.trim(),
       hourlyRate: parseFloat(document.getElementById('f-rate').value) || 0,
+      payCycle: document.getElementById('f-paycycle').value,
       active: emp ? (emp.active!==false) : true
     };
     if(wt==='kiosk') data.employmentType = document.getElementById('f-employment-type').value;
+    if(wt==='phone'){
+      data.shiftType = document.getElementById('f-shifttype').value;
+      if(data.shiftType==='fixed'){
+        data.fixedShiftStart = document.getElementById('f-fixed-start').value;
+        data.fixedShiftEnd = document.getElementById('f-fixed-end').value;
+      } else if(emp){
+        data.fixedShiftStart = firebase.firestore.FieldValue.delete();
+        data.fixedShiftEnd = firebase.firestore.FieldValue.delete();
+      }
+    }
     if(pendingPhoto) data.profilePhoto = pendingPhoto;
-    if(!data.name || (wt==='phone' && !data.username) || (wt==='phone' && !emp && !newPin)){ toast('נא למלא את כל השדות'); return; }
-    if(newPin){
-      data.pinHash = await sha256(newPin);
-      data.pin = firebase.firestore.FieldValue.delete();
+    if(!data.name || (wt==='phone' && !data.username) || (wt==='phone' && !newPin && !(emp&&emp.pin))){ toast('נא למלא את כל השדות (כולל קוד אישי)'); return; }
+    if(wt==='phone' && newPin){
+      data.pin = newPin;
+      if(emp && emp.pinHash) data.pinHash = firebase.firestore.FieldValue.delete(); // no longer used — the code is visible to the admin now
     }
     let id = empId;
     if(emp){
       await db.collection('employees').doc(emp.id).update(data);
     } else {
       data.deviceId = null;
-      delete data.pin; // brand new doc — nothing to delete
       const ref = await db.collection('employees').add(data);
       id = ref.id;
     }
@@ -829,6 +902,16 @@ function employeeTimelineItems(empId){
     let label, sub;
     if(s.manualTotalHours != null){
       label = 'הזנה ידנית'; sub = `${fmtHours(s.manualTotalHours)} שעות`;
+    } else if(s.isFixedShift){
+      const inD = s.checkIn ? (s.checkIn.toDate?s.checkIn.toDate():new Date(s.checkIn)) : null;
+      const outD = s.checkOut ? (s.checkOut.toDate?s.checkOut.toDate():new Date(s.checkOut)) : null;
+      const schedStart = s.scheduledStart ? (s.scheduledStart.toDate?s.scheduledStart.toDate():new Date(s.scheduledStart)) : null;
+      const schedEnd = s.scheduledEnd ? (s.scheduledEnd.toDate?s.scheduledEnd.toDate():new Date(s.scheduledEnd)) : null;
+      label = (outD ? 'משמרת קבועה' : 'משמרת קבועה — פתוחה') + ' ⏱️';
+      sub = schedStart && schedEnd ? `משמרת מוגדרת: ${fmtTimeHe(schedStart)}–${fmtTimeHe(schedEnd)} (${fmtHours((schedEnd-schedStart)/3600000)} ש')` : '';
+      if(s.overtimeMinutes) sub += ` + ${s.overtimeMinutes} דק' נוספות`;
+      sub += `<br><span class="muted">סריקה בפועל: כניסה ${inD?fmtTimeHe(inD):'—'}${outD?` → יציאה ${fmtTimeHe(outD)}`:''}</span>`;
+      if(s.needsReview) sub += ' <span class="tag tag-review">דורש בדיקה</span>';
     } else {
       const inD = s.checkIn ? (s.checkIn.toDate?s.checkIn.toDate():new Date(s.checkIn)) : null;
       const outD = s.checkOut ? (s.checkOut.toDate?s.checkOut.toDate():new Date(s.checkOut)) : null;
@@ -1365,9 +1448,10 @@ function openPaymentForm(empId, paymentId, isNav){
       </div>
     </div>
   `;
+  const isFlexible = emp.payCycle === 'flexible';
   const typeSel = document.getElementById('f-type');
   const weekSection = document.getElementById('week-section');
-  const syncTypeUi = ()=>{ weekSection.style.display = typeSel.value==='normal' ? '' : 'none'; };
+  const syncTypeUi = ()=>{ weekSection.style.display = (typeSel.value==='normal' && !isFlexible) ? '' : 'none'; };
   typeSel.onchange = syncTypeUi;
   syncTypeUi();
   document.getElementById('btn-prev-w').onclick = ()=>{ state.periodOffset++; openPaymentForm(empId, paymentId, true); };
@@ -1399,7 +1483,7 @@ function openPaymentForm(empId, paymentId, isNav){
       isAdjustment: type==='adjustment',
       note: note || firebase.firestore.FieldValue.delete()
     };
-    if(type==='normal'){
+    if(type==='normal' && !isFlexible){
       payload.periodKey = periodKeyOf(targetWeek);
     } else {
       payload.periodKey = firebase.firestore.FieldValue.delete();
@@ -1407,7 +1491,7 @@ function openPaymentForm(empId, paymentId, isNav){
     if(existing){
       await db.collection('payments').doc(existing.id).update(payload);
     } else {
-      if(type!=='normal') delete payload.periodKey; // brand new doc — nothing to delete, just omit
+      if(type!=='normal' || isFlexible) delete payload.periodKey; // brand new doc — nothing to delete, just omit
       if(!note) delete payload.note;
       await db.collection('payments').add(payload);
     }
