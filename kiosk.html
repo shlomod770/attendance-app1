@@ -6,59 +6,27 @@
 <title>Работно време — Каса</title>
 <link rel="stylesheet" href="style.css">
 <style>
-  html, body{ height:100%; }
-  body{ background:var(--ink); }
-  #app{ max-width:720px; margin:0 auto; padding:24px 16px; min-height:100vh; display:flex; flex-direction:column; }
-  #app h1{ color:var(--paper); text-align:center; margin-bottom:8px; }
-  #root{ flex:1; display:flex; flex-direction:column; }
-  #root.center-content{ justify-content:center; }
-  .kiosk-btn{
-    display:block; width:100%; padding:22px; margin-bottom:12px;
-    background:#fff; border:1px solid var(--line); border-radius:16px;
-    font-size:22px; font-weight:700; color:var(--ink); text-align:center; cursor:pointer;
-  }
-  .kiosk-btn:active{ background:var(--paper-2); }
-  video, canvas{ width:100%; border-radius:16px; background:#000; }
-  .kiosk-primary-btn{
-    display:flex; flex-direction:column; align-items:center; justify-content:center;
-    width:100%; aspect-ratio:1.15; max-height:52vh;
-    background:var(--ink-2); color:var(--paper); border:3px solid var(--brass); border-radius:24px;
-    cursor:pointer; box-shadow:0 12px 32px rgba(0,0,0,.45);
-  }
-  .kiosk-primary-btn:active{ background:#233355; }
-  .kiosk-primary-btn .lbl{ font-family:'Bebas Neue',sans-serif; font-size:44px; letter-spacing:.05em; line-height:1.15; }
-  .kiosk-primary-btn .sub{ font-family:'IBM Plex Mono',monospace; font-size:15px; color:var(--brass); margin-top:10px; letter-spacing:.03em; }
-  .kiosk-caption{ color:var(--paper); opacity:.75; text-align:center; font-size:15px; margin-top:22px; line-height:1.7; max-width:460px; margin-left:auto; margin-right:auto; }
-  .kiosk-footer-bar{
-    margin-top:auto; padding-top:24px; text-align:center;
-  }
-  .kiosk-footer-link{
-    background:transparent; border:1px solid rgba(255,255,255,.25); color:rgba(255,255,255,.75);
-    border-radius:100px; padding:10px 18px; font-size:13px; cursor:pointer;
-  }
-  .kiosk-footer-link:active{ background:rgba(255,255,255,.1); }
-  .kiosk-back-btn{
-    background:rgba(255,255,255,.12); color:#fff; border:1px solid rgba(255,255,255,.3);
-    border-radius:10px; padding:8px 16px; font-size:14px; cursor:pointer;
-  }
-  .kiosk-back-btn:active{ background:rgba(255,255,255,.22); }
+  /* Picker grid tiles reuse the same card look as the rest of the app */
   .picker-tile{
     background:#fff; border:1px solid var(--line); border-radius:12px;
     padding:8px; cursor:pointer; text-align:center;
   }
   .picker-tile img{ width:100%; aspect-ratio:1; object-fit:cover; border-radius:8px; margin-bottom:6px; }
   .picker-tile .pname{ font-size:15px; font-weight:700; color:var(--ink); }
+  video, canvas{ width:100%; border-radius:16px; background:#000; }
 </style>
 </head>
 <body>
-<div id="app">
-  <h1 style="font-size:34px;">Работно време</h1>
+<div class="screen" id="app">
+  <div class="center" style="margin:30px 0 20px;">
+    <h1 style="font-size:38px;">Работно време</h1>
+  </div>
   <div id="root"></div>
 </div>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
 <script src="firebase-config.js"></script>
-<script src="app-kiosk.js?v=6"></script>
+<script src="app-kiosk.js?v=7"></script>
 </body>
 </html>
