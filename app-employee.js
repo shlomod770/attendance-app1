@@ -229,6 +229,17 @@ async function processScan(){
     const now = new Date();
     const loc = await getLocation();
 
+    // Quietly pull the latest version of this employee's own record — this way,
+    // if the manager just changed something (like switching between fixed-shift
+    // and regular hours), it takes effect on the very next scan, with no need
+    // to reload the page or log in again.
+    try{
+      const freshDoc = await db.collection('employees').doc(currentEmployee.id).get();
+      if(freshDoc.exists){
+        currentEmployee = { id: currentEmployee.id, ...freshDoc.data() };
+      }
+    }catch(e){ /* if this fails, just continue with what we already have */ }
+
     if(currentEmployee.shiftType === 'fixed'){
       await processFixedShiftScan(now, loc);
       return;
