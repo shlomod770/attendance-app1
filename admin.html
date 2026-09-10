@@ -1,23 +1,26 @@
 <!DOCTYPE html>
-<html lang="bg" dir="ltr">
+<html lang="he" dir="rtl">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
-<title>Работно време</title>
+<title>ניהול נוכחות ושכר</title>
 <link rel="stylesheet" href="style.css">
+<style>
+  #root{max-width:560px;margin:0 auto;padding:0 16px 90px;}
+</style>
 </head>
 <body>
-<div class="screen" id="app">
-  <div class="center" style="margin:30px 0 20px;">
-    <h1 style="font-size:38px;">Работно време</h1>
-  </div>
-  <div id="root"></div>
+<div class="topbar no-print">
+  <h1 style="font-size:26px;">ניהול נוכחות ושכר</h1>
 </div>
+<div class="tabs no-print" id="tabs"></div>
+<div id="root"></div>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
 <script src="firebase-config.js"></script>
-<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
-<script src="app-employee.js?v=7"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="app-admin.js?v=15"></script>
 </body>
 </html>
