@@ -52,21 +52,20 @@ async function loadKioskEmployees(){
     .sort((a,b)=>a.name.localeCompare(b.name,'bg'));
 }
 
-// ---- Main screen: clean, just two big buttons. No name list shown here. ----
+// ---- Main screen: same look as the phone app's scan button ----
 function renderMain(){
   armIdleTimer();
-  root.classList.add('center-content');
   root.innerHTML = `
-    <button class="kiosk-primary-btn" id="btn-shift">
+    <button class="stamp" id="btn-shift">
       <div class="lbl">НАЧАЛО / КРАЙ</div>
-      <div class="sub">на смяна</div>
+      <div class="clock-digits">на смяна</div>
     </button>
-    <p class="kiosk-caption">
+    <p class="muted" style="text-align:center;margin-top:20px;line-height:1.7;">
       Натиснете тук, изберете името си, снимайте се — и часовете ви ще се запишат автоматично.
       Не забравяйте да отбележите и края на смяната, за да изчислим часовете ви правилно.
     </p>
-    <div class="kiosk-footer-bar">
-      <button class="kiosk-footer-link" id="btn-new">Нов служител? Натиснете тук</button>
+    <div style="text-align:center;margin-top:30px;">
+      <button class="btn btn-ghost btn-sm" id="btn-new">Нов служител? Натиснете тук</button>
     </div>
   `;
   document.getElementById('btn-shift').onclick = renderPicker;
@@ -76,7 +75,6 @@ function renderMain(){
 // ---- Employee picker grid: fetched fresh only when opened, not on every idle reset ----
 async function renderPicker(){
   armIdleTimer();
-  root.classList.remove('center-content');
   root.innerHTML = `<div class="card center"><p class="muted">Зареждане...</p></div>`;
   await loadKioskEmployees();
   if(!kioskEmployees.length){
@@ -86,7 +84,7 @@ async function renderPicker(){
   }
   root.innerHTML = `
     <div style="margin-bottom:10px;">
-      <button class="kiosk-back-btn" id="btn-back">← Назад</button>
+      <button class="btn btn-ghost btn-sm" id="btn-back">← Назад</button>
     </div>
     <div id="grid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;"></div>
   `;
@@ -128,7 +126,6 @@ function renderConfirm(emp){
 
 function renderNewEmployeeForm(){
   armIdleTimer();
-  root.classList.remove('center-content');
   root.innerHTML = `
     <div class="card">
       <h2 style="font-size:22px;">Нов служител</h2>
