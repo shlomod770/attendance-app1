@@ -58,7 +58,8 @@ function renderMain(){
   root.classList.add('center-content');
   root.innerHTML = `
     <button class="kiosk-primary-btn" id="btn-shift">
-      <span>Начало /<br>Край на смяна</span>
+      <div class="lbl">НАЧАЛО / КРАЙ</div>
+      <div class="sub">на смяна</div>
     </button>
     <p class="kiosk-caption">
       Натиснете тук, изберете името си, снимайте се — и часовете ви ще се запишат автоматично.
