@@ -55,6 +55,7 @@ async function loadKioskEmployees(){
 // ---- Main screen: same look as the phone app's scan button ----
 function renderMain(){
   armIdleTimer();
+  root.classList.add('center-content');
   root.innerHTML = `
     <button class="stamp" id="btn-shift">
       <div class="lbl">НАЧАЛО / КРАЙ</div>
@@ -64,7 +65,7 @@ function renderMain(){
       Натиснете тук, изберете името си, снимайте се — и часовете ви ще се запишат автоматично.
       Не забравяйте да отбележите и края на смяната, за да изчислим часовете ви правилно.
     </p>
-    <div style="text-align:center;margin-top:30px;">
+    <div style="text-align:center;margin-top:auto;padding-top:30px;">
       <button class="btn btn-ghost btn-sm" id="btn-new">Нов служител? Натиснете тук</button>
     </div>
   `;
@@ -75,6 +76,7 @@ function renderMain(){
 // ---- Employee picker grid: fetched fresh only when opened, not on every idle reset ----
 async function renderPicker(){
   armIdleTimer();
+  root.classList.remove('center-content');
   root.innerHTML = `<div class="card center"><p class="muted">Зареждане...</p></div>`;
   await loadKioskEmployees();
   if(!kioskEmployees.length){
@@ -126,6 +128,7 @@ function renderConfirm(emp){
 
 function renderNewEmployeeForm(){
   armIdleTimer();
+  root.classList.remove('center-content');
   root.innerHTML = `
     <div class="card">
       <h2 style="font-size:22px;">Нов служител</h2>
