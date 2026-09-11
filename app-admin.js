@@ -81,6 +81,53 @@ async function loadAll(){
     state.config = { qrToken: genToken(), periodStartDay:5, businessRadius:150 };
     await db.collection('config').doc('main').set(state.config);
   }
+  refreshWeeklySummary(); // fire-and-forget — keeps the email report's data source fresh
+}
+
+// Writes one small, pre-computed document with exactly what a manager needs to
+// know before paying people: hours worked and amount STILL OWED (not what's
+// already been paid) for the last completed week, split by pay cycle. This
+// runs quietly every time the admin app is used, so the weekly email script
+// can just read this single document instead of searching through shifts —
+// which is what was causing the quota errors.
+async function refreshWeeklySummary(){
+  try{
+    const weekStart = periodStartAtOffset(1);
+    const weekEnd = periodStartAtOffset(0);
+    const active = state.employees.filter(e=>e.active!==false && !e.pendingApproval);
+
+    const weeklyEmployees = active
+      .filter(e=>e.payCycle!=='flexible')
+      .map(e=>{
+        const st = statsForRange(e.id, weekStart, weekEnd);
+        return { name: displayName(e), hours: Math.round(st.hours*100)/100, toPay: Math.round((st.earned-st.paid)*100)/100 };
+      })
+      .filter(r => r.hours > 0 || r.toPay !== 0);
+
+    const flexibleEmployees = active
+      .filter(e=>e.payCycle==='flexible')
+      .map(e=>{
+        const life = employeeLifetimeStats(e.id);
+        return { name: displayName(e), totalOwed: Math.round(life.remaining*100)/100 };
+      })
+      .filter(r => r.totalOwed !== 0);
+
+    const totalToPay = weeklyEmployees.reduce((s,r)=>s+r.toPay, 0);
+    const totalHours = weeklyEmployees.reduce((s,r)=>s+r.hours, 0);
+    const totalFlexibleOwed = flexibleEmployees.reduce((s,r)=>s+r.totalOwed, 0);
+
+    await db.collection('summary').doc('weekly').set({
+      generatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      weekStartKey: periodKeyOf(weekStart),
+      weekLabel: `${fmtDateHe(weekStart)} – ${fmtDateHe(addDays(weekStart,6))}`,
+      weeklyEmployees, flexibleEmployees,
+      totalToPay: Math.round(totalToPay*100)/100,
+      totalHours: Math.round(totalHours*100)/100,
+      totalFlexibleOwed: Math.round(totalFlexibleOwed*100)/100
+    });
+  }catch(e){
+    console.error('refreshWeeklySummary failed (non-critical):', e);
+  }
 }
 function genToken(){ return 'shop-' + Math.random().toString(36).slice(2) + Date.now().toString(36); }
 function displayName(e){
@@ -562,33 +609,101 @@ function renderPayroll(){
 }
 
 // ---------- employees list ----------
+function getEmployeeOrder(){
+  return state.config.employeeOrder || [];
+}
+async function setEmployeeOrder(order){
+  state.config.employeeOrder = order;
+  await db.collection('config').doc('main').update({ employeeOrder: order });
+}
+function sortEmployeesForList(list){
+  const mode = state.employeeSortMode || 'custom';
+  if(mode === 'name'){
+    return [...list].sort((a,b)=>displayName(a).localeCompare(displayName(b),'he'));
+  }
+  if(mode === 'debt'){
+    return [...list].sort((a,b)=>employeeLifetimeStats(b.id).remaining - employeeLifetimeStats(a.id).remaining);
+  }
+  if(mode === 'hours'){
+    const ws = periodStartAtOffset(1), we = periodStartAtOffset(0);
+    return [...list].sort((a,b)=>statsForRange(b.id,ws,we).hours - statsForRange(a.id,ws,we).hours);
+  }
+  // custom drag order — anyone not in the saved order goes at the end, in their natural order
+  const order = getEmployeeOrder();
+  const known = order.map(id=>list.find(e=>e.id===id)).filter(Boolean);
+  const rest = list.filter(e=>!order.includes(e.id));
+  return [...known, ...rest];
+}
+
 function renderEmployees(){
+  if(!state.employeeSortMode) state.employeeSortMode = 'custom';
+  const archived = state.employees.filter(e=>!e.pendingApproval && e.active===false);
+  const visible = sortEmployeesForList(state.employees.filter(e=>!e.pendingApproval && e.active!==false));
+
   root.innerHTML = `
     <div class="card">
       <button class="btn btn-brass" id="btn-add-emp">+ הוספת עובד</button>
+      <div class="row" style="margin-top:10px;align-items:center;">
+        <label style="margin:0;">מיון:</label>
+        <select id="f-sort-mode" style="width:auto;flex:1;">
+          <option value="custom" ${state.employeeSortMode==='custom'?'selected':''}>מותאם אישית (גררו לסידור)</option>
+          <option value="name" ${state.employeeSortMode==='name'?'selected':''}>לפי שם</option>
+          <option value="debt" ${state.employeeSortMode==='debt'?'selected':''}>לפי חוב (מהגבוה)</option>
+          <option value="hours" ${state.employeeSortMode==='hours'?'selected':''}>לפי שעות שבוע אחרון (מהגבוה)</option>
+        </select>
+      </div>
+      ${archived.length ? `<button class="btn btn-ghost btn-sm" id="btn-toggle-archive" style="margin-top:10px;">${state.showArchive?'הסתרת':'הצגת'} ארכיון (${archived.length})</button>` : ''}
     </div>
+    ${state.showArchive ? `<div class="card"><h3 style="font-size:14px;">ארכיון (עובדים מושבתים)</h3><div id="archive-list"></div></div>` : ''}
     <div id="emp-list"></div>
   `;
   document.getElementById('btn-add-emp').onclick = ()=>openEmployeeForm(null);
+  document.getElementById('f-sort-mode').onchange = (e)=>{ state.employeeSortMode = e.target.value; renderEmployees(); };
+  const archiveBtn = document.getElementById('btn-toggle-archive');
+  if(archiveBtn) archiveBtn.onclick = ()=>{ state.showArchive = !state.showArchive; renderEmployees(); };
+
+  if(state.showArchive){
+    const aCont = document.getElementById('archive-list');
+    aCont.innerHTML = archived.map(e=>`
+      <div class="row between" style="padding:6px 0;border-bottom:1px solid var(--line);">
+        <span>${displayName(e)}</span>
+        <button class="btn btn-ghost btn-sm" data-restore="${e.id}">הפעלה מחדש</button>
+      </div>
+    `).join('');
+    aCont.querySelectorAll('[data-restore]').forEach(b=>b.onclick=async()=>{
+      await db.collection('employees').doc(b.dataset.restore).update({active:true});
+      await loadAll(); renderApp();
+    });
+  }
+
   const list = document.getElementById('emp-list');
-  state.employees.filter(e=>!e.pendingApproval).forEach(e=>{
+  const isCustomSort = state.employeeSortMode === 'custom';
+  visible.forEach(e=>{
     const stats = employeeLifetimeStats(e.id);
     const card = document.createElement('div');
-    card.className = 'card';
+    card.className = 'card emp-row';
+    card.dataset.id = e.id;
     card.innerHTML = `
-      <div class="row between" style="cursor:pointer;" data-open="${e.id}">
-        <div class="row" style="gap:10px;">
-          ${e.profilePhoto?`<img src="${e.profilePhoto}" style="width:40px;height:40px;object-fit:cover;border-radius:8px;">`:''}
-          <div>
-            <b>${displayName(e)}</b> ${e.workType==='kiosk'?'🖥️':'📱'} ${e.active===false?'<span class="tag tag-off">מושבת</span>':''}
-            ${hasOpenShift(e.id)?'<span class="tag tag-open">משמרת פתוחה</span>':''}
-            ${hasReviewShift(e.id)?'<span class="tag tag-review">דורש בדיקה</span>':''}
-            <div class="muted">${e.workType==='kiosk'?'עובד מחשב':`משתמש: ${e.username}`} · ${money(e.hourlyRate)}/שעה</div>
+      <div class="row" style="gap:8px;align-items:center;">
+        ${isCustomSort ? `<div class="drag-handle" draggable="true" data-id="${e.id}" title="גררו לסידור" style="display:grid;grid-template-columns:repeat(2,4px);grid-gap:3px;cursor:grab;padding:6px;flex-shrink:0;">
+          <span style="width:4px;height:4px;border-radius:50%;background:#bbb;"></span><span style="width:4px;height:4px;border-radius:50%;background:#bbb;"></span>
+          <span style="width:4px;height:4px;border-radius:50%;background:#bbb;"></span><span style="width:4px;height:4px;border-radius:50%;background:#bbb;"></span>
+          <span style="width:4px;height:4px;border-radius:50%;background:#bbb;"></span><span style="width:4px;height:4px;border-radius:50%;background:#bbb;"></span>
+        </div>` : ''}
+        <div class="row between" style="cursor:pointer;flex:1;" data-open="${e.id}">
+          <div class="row" style="gap:10px;">
+            ${e.profilePhoto?`<img src="${e.profilePhoto}" style="width:40px;height:40px;object-fit:cover;border-radius:8px;">`:''}
+            <div>
+              <b>${displayName(e)}</b> ${e.workType==='kiosk'?'🖥️':'📱'}
+              ${hasOpenShift(e.id)?'<span class="tag tag-open">משמרת פתוחה</span>':''}
+              ${hasReviewShift(e.id)?'<span class="tag tag-review">דורש בדיקה</span>':''}
+              <div class="muted">${e.workType==='kiosk'?'עובד מחשב':`משתמש: ${e.username}`} · ${money(e.hourlyRate)}/שעה</div>
+            </div>
           </div>
-        </div>
-        <div class="mono" style="text-align:left;">
-          <div class="muted" style="font-size:12px;">חוב כרגע</div>
-          <b>${money(stats.remaining)}</b>
+          <div class="mono" style="text-align:left;">
+            <div class="muted" style="font-size:12px;">חוב כרגע</div>
+            <b>${money(stats.remaining)}</b>
+          </div>
         </div>
       </div>
     `;
@@ -597,6 +712,31 @@ function renderEmployees(){
   list.querySelectorAll('[data-open]').forEach(b=>b.onclick=()=>{
     state.detailEmployeeId = b.dataset.open; renderApp();
   });
+
+  if(isCustomSort){
+    list.querySelectorAll('.emp-row').forEach(row=>{
+      row.ondragover = (e)=>{ e.preventDefault(); row.style.borderTop = '3px solid var(--brass)'; };
+      row.ondragleave = ()=>{ row.style.borderTop = ''; };
+      row.ondrop = async (e)=>{
+        e.preventDefault();
+        row.style.borderTop = '';
+        const draggedId = e.dataTransfer.getData('text/plain');
+        const targetId = row.dataset.id;
+        if(!draggedId || draggedId === targetId) return;
+        const order = visible.map(x=>x.id);
+        const from = order.indexOf(draggedId);
+        const to = order.indexOf(targetId);
+        if(from<0 || to<0) return;
+        order.splice(from,1);
+        order.splice(to,0,draggedId);
+        await setEmployeeOrder(order);
+        renderEmployees();
+      };
+    });
+    list.querySelectorAll('.drag-handle').forEach(h=>{
+      h.ondragstart = (e)=>{ e.dataTransfer.setData('text/plain', h.dataset.id); };
+    });
+  }
 }
 
 // Employees who registered themselves at the kiosk sit here until you review
