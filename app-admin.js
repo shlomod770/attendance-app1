@@ -26,6 +26,26 @@ function toast(msg){
   setTimeout(()=>t.remove(), 2600);
 }
 
+function copyToClipboard(text){
+  const done = ()=>toast('הועתק! אפשר להדביק בוואטסאפ, מייל וכו\'');
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).then(done).catch(()=>fallbackCopy(text, done));
+  } else {
+    fallbackCopy(text, done);
+  }
+}
+function fallbackCopy(text, done){
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try{ document.execCommand('copy'); done(); }
+  catch(e){ toast('לא הצלחנו להעתיק אוטומטית — נסו לבחור ולהעתיק ידנית.'); }
+  document.body.removeChild(ta);
+}
+
 async function sha256(str){
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
   return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
@@ -371,7 +391,13 @@ function renderApp(){
     `<button class="tab ${state.tab===id?'active':''}" data-tab="${id}">${label}${id==='newEmployees'&&pendingCount?` (${pendingCount})`:''}</button>`
   ).join('');
   tabsEl.querySelectorAll('.tab').forEach(btn=>{
-    btn.onclick = ()=>{ state.tab = btn.dataset.tab; state.detailEmployeeId=null; renderApp(); };
+    btn.onclick = ()=>{
+      const target = btn.dataset.tab;
+      state.tab = target; state.detailEmployeeId=null; renderApp();
+      // Quiet background refresh — updates the data without any visible reload,
+      // so switching tabs also catches anything that changed a moment ago.
+      loadAll().then(()=>{ if(state.tab === target) renderApp(); }).catch(()=>{});
+    };
   });
   if(state.tab==='dashboard') renderDashboard();
   else if(state.tab==='newEmployees') renderNewEmployees();
@@ -464,8 +490,8 @@ function renderPayroll(){
   if(state.payrollOffset === undefined) state.payrollOffset = 1; // default: last completed week
   const weekStart = periodStartAtOffset(state.payrollOffset);
   const weekEnd = addDays(weekStart,7);
-  const active = state.employees.filter(e=>e.active!==false && e.payCycle!=='flexible');
-  const flexibleEmployees = state.employees.filter(e=>e.active!==false && e.payCycle==='flexible');
+  const active = sortByCustomOrder(state.employees.filter(e=>e.active!==false && e.payCycle!=='flexible'));
+  const flexibleEmployees = sortByCustomOrder(state.employees.filter(e=>e.active!==false && e.payCycle==='flexible'));
 
   const allRows = active.map(e=>{
     const st = statsForRange(e.id, weekStart, weekEnd);
@@ -493,6 +519,7 @@ function renderPayroll(){
         </div>
         <button id="btn-next" ${state.payrollOffset===0?'disabled style="opacity:.3"':''}>‹</button>
       </div>
+      <button class="btn btn-ghost btn-sm" id="btn-copy-summary" style="margin-top:10px;">📋 העתקת סיכום (לוואטסאפ/מייל)</button>
     </div>
     <div class="card">
       <div class="row between"><span class="muted">רק השבוע הזה</span><b class="mono">${money(totalThisWeek)}</b></div>
@@ -510,6 +537,21 @@ function renderPayroll(){
   `;
   document.getElementById('btn-prev').onclick = ()=>{ state.payrollOffset++; renderPayroll(); };
   document.getElementById('btn-next').onclick = ()=>{ if(state.payrollOffset>0){ state.payrollOffset--; renderPayroll(); } };
+  document.getElementById('btn-copy-summary').onclick = ()=>{
+    const lines = [`סגירת שבוע — ${fmtDateHe(weekStart)} עד ${fmtDateHe(addDays(weekStart,6))}`, ''];
+    rows.forEach(r=>{
+      lines.push(`${displayName(r.emp)}: ${fmtHours(r.hours)} שעות · לשלם ${money(r.remaining)}`);
+    });
+    lines.push('', `סה"כ לשלם השבוע: ${money(totalThisWeek)}`);
+    if(flexibleEmployees.length){
+      lines.push('', 'עובדים בתשלום גמיש:');
+      flexibleEmployees.forEach(e=>{
+        const life = employeeLifetimeStats(e.id);
+        if(life.remaining > 0.005) lines.push(`${displayName(e)}: סה"כ נותר ${money(life.remaining)}`);
+      });
+    }
+    copyToClipboard(lines.join('\n'));
+  };
 
   if(flexibleEmployees.length){
     const flexCont = document.getElementById('flex-pay-rows');
@@ -616,6 +658,12 @@ async function setEmployeeOrder(order){
   state.config.employeeOrder = order;
   await db.collection('config').doc('main').update({ employeeOrder: order });
 }
+function sortByCustomOrder(list){
+  const order = getEmployeeOrder();
+  const known = order.map(id=>list.find(e=>e.id===id)).filter(Boolean);
+  const rest = list.filter(e=>!order.includes(e.id));
+  return [...known, ...rest];
+}
 function sortEmployeesForList(list){
   const mode = state.employeeSortMode || 'custom';
   if(mode === 'name'){
@@ -629,10 +677,7 @@ function sortEmployeesForList(list){
     return [...list].sort((a,b)=>statsForRange(b.id,ws,we).hours - statsForRange(a.id,ws,we).hours);
   }
   // custom drag order — anyone not in the saved order goes at the end, in their natural order
-  const order = getEmployeeOrder();
-  const known = order.map(id=>list.find(e=>e.id===id)).filter(Boolean);
-  const rest = list.filter(e=>!order.includes(e.id));
-  return [...known, ...rest];
+  return sortByCustomOrder(list);
 }
 
 function renderEmployees(){
