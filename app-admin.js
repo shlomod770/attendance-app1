@@ -275,13 +275,28 @@ function statsUpTo(empId, cutoff){
     .reduce((sum,s)=>sum+shiftDurationHours(s), 0);
   const paid = state.payments
     .filter(p=>p.employeeId===empId && !p.isTip)
-    // A debt closure is a permanent, immediate write-off — it should reduce the
-    // debt right away no matter when it's dated, not just once its own date is
-    // "in the past" relative to whatever week you happen to be looking at.
-    .filter(p=> p.isAdjustment || (()=>{ const d = paymentEffectiveDate(p); return d && d < cutoff; })())
+    // Strictly "before the cutoff", full stop — including debt closures. This has
+    // to be a mathematically honest point-in-time snapshot: any payment/closure
+    // dated on-or-after the cutoff must NOT be counted here, or it gets counted
+    // twice by anything that both uses this as a starting balance AND separately
+    // lists that same payment as its own row (e.g. the itemized report).
+    .filter(p=>{ const d = paymentEffectiveDate(p); return d && d < cutoff; })
     .reduce((s,p)=>s+(p.amount||0),0);
   const earned = hours*rate;
   return { hours, earned, paid, remaining: earned-paid };
+}
+// Same as the employee-card figure below, but specifically "does this debt
+// closure feel immediate even if dated within the still-open current week" —
+// used ONLY for that one on-screen figure, never for anything that also lists
+// the closure as a separate row (which would double-count it).
+function debtNotIncludingCurrentWeek(empId){
+  const weekStart = periodStartAtOffset(0);
+  const base = statsUpTo(empId, weekStart);
+  const closuresThisWeekSoFar = state.payments
+    .filter(p=>p.employeeId===empId && p.isAdjustment)
+    .filter(p=>{ const d = paymentEffectiveDate(p); return d && d >= weekStart; })
+    .reduce((s,p)=>s+(p.amount||0),0);
+  return base.remaining - closuresThisWeekSoFar;
 }
 function weekStats(empId, offset){
   const start = periodStartAtOffset(offset);
@@ -988,7 +1003,7 @@ function renderEmployeeDetail(empId){
   if(!emp){ state.detailEmployeeId=null; renderEmployees(); return; }
   const life = employeeLifetimeStats(empId);
   const lastWeek = statsForRange(empId, periodStartAtOffset(1), periodStartAtOffset(0));
-  const debtNotIncludingCurrent = statsUpTo(empId, periodStartAtOffset(0)).remaining;
+  const debtNotIncludingCurrent = debtNotIncludingCurrentWeek(empId);
 
   root.innerHTML = `
     <div class="row between no-print" style="margin-bottom:6px;">
