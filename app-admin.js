@@ -1251,7 +1251,12 @@ function buildAndShowSlip(empId, rangeStart, rangeEndExcl, titleLine, backFn, op
         <tr><th style="text-align:${L.align};">${L.date}</th><th style="text-align:${L.align};">${L.in}</th><th style="text-align:${L.align};">${L.out}</th><th style="text-align:${L.align};">${L.hours}</th></tr>
         ${shifts.map(s=>{
           if(s.manualTotalHours!=null){
-            return `<tr><td colspan="3">${L.manual}</td><td class="mono">${fmtHours(s.manualTotalHours)}</td></tr>`;
+            let weekLabel = '';
+            if(s.periodKey){
+              const wStart = new Date(s.periodKey + 'T00:00:00');
+              weekLabel = ` (${opts.lang==='he'?'שבוע':'седмица'}: ${toInputDate(wStart)}–${toInputDate(addDays(wStart,6))})`;
+            }
+            return `<tr><td colspan="3">${L.manual}${weekLabel}</td><td class="mono">${fmtHours(s.manualTotalHours)}</td></tr>`;
           }
           const inD = s.checkIn.toDate?s.checkIn.toDate():new Date(s.checkIn);
           const outD = s.checkOut ? (s.checkOut.toDate?s.checkOut.toDate():new Date(s.checkOut)) : null;
@@ -1275,7 +1280,12 @@ function buildAndShowSlip(empId, rangeStart, rangeEndExcl, titleLine, backFn, op
     shifts.forEach(s=>{
       const d = shiftEffectiveDate(s);
       if(s.manualTotalHours!=null){
-        rows.push({date:d, event:L.manual, hours:fmtHours(s.manualTotalHours), amount:''});
+        let weekLabel = '';
+        if(s.periodKey){
+          const wStart = new Date(s.periodKey + 'T00:00:00');
+          weekLabel = ` (${opts.lang==='he'?'שבוע':'седмица'}: ${toInputDate(wStart)}–${toInputDate(addDays(wStart,6))})`;
+        }
+        rows.push({date:d, event: L.manual + weekLabel, hours:fmtHours(s.manualTotalHours), amount:''});
       } else {
         const inD = s.checkIn.toDate?s.checkIn.toDate():new Date(s.checkIn);
         const outD = s.checkOut ? (s.checkOut.toDate?s.checkOut.toDate():new Date(s.checkOut)) : null;
