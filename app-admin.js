@@ -1275,7 +1275,11 @@ function buildAndShowSlip(empId, rangeStart, rangeEndExcl, titleLine, backFn, op
       </table>` : `<p class="muted">${L.noPayments}</p>`}
     `;
   } else {
-    // combined: everything merged into one chronological table
+    // combined: everything merged into one chronological table, with a running
+    // balance that continues from the employee's real debt as of right before
+    // this report's date range — not reset to zero — so a discrepancy can be
+    // traced to the exact row where it appears.
+    const rate = emp.hourlyRate || 0;
     const rows = [];
     shifts.forEach(s=>{
       const d = shiftEffectiveDate(s);
@@ -1285,24 +1289,58 @@ function buildAndShowSlip(empId, rangeStart, rangeEndExcl, titleLine, backFn, op
           const wStart = new Date(s.periodKey + 'T00:00:00');
           weekLabel = ` (${opts.lang==='he'?'שבוע':'седмица'}: ${toInputDate(wStart)}–${toInputDate(addDays(wStart,6))})`;
         }
-        rows.push({date:d, event: L.manual + weekLabel, hours:fmtHours(s.manualTotalHours), amount:''});
+        const rowAmount = s.manualTotalHours * rate;
+        rows.push({date:d, event: L.manual + weekLabel, hours:fmtHours(s.manualTotalHours), rowAmount, isBalanceRow:true});
       } else {
         const inD = s.checkIn.toDate?s.checkIn.toDate():new Date(s.checkIn);
         const outD = s.checkOut ? (s.checkOut.toDate?s.checkOut.toDate():new Date(s.checkOut)) : null;
         const ev = `${L.checkInWord} ${toInputTime(inD)}${outD?` → ${L.checkOutWord} ${toInputTime(outD)}`:''}`;
-        rows.push({date:d, event:ev, hours: outD?fmtHours(shiftDurationHours(s)):'—', amount:''});
+        const hrs = outD ? shiftDurationHours(s) : null;
+        rows.push({date:d, event:ev, hours: hrs!=null?fmtHours(hrs):'—', rowAmount: hrs!=null?hrs*rate:0, isBalanceRow: hrs!=null});
       }
     });
     allPaymentsInRange.forEach(p=>{
       const d = p.date.toDate?p.date.toDate():new Date(p.date);
-      rows.push({date:d, event: paymentTypeLabel(p)+(p.note?` — ${p.note}`:''), hours:'', amount:money(p.amount)});
+      const affectsBalance = !p.isTip; // normal payments AND debt-closures reduce the balance; tips don't
+      rows.push({
+        date:d, event: paymentTypeLabel(p)+(p.note?` — ${p.note}`:''), hours:'',
+        displayAmount: p.amount,
+        rowAmount: affectsBalance ? -p.amount : 0,
+        isBalanceRow: affectsBalance,
+        isTipNote: p.isTip
+      });
     });
     rows.sort((a,b)=>a.date-b.date);
+
+    const openingBalance = statsUpTo(empId, rangeStart).remaining;
+    let running = openingBalance;
+    const rowsHtml = rows.map(r=>{
+      let amtText;
+      if(r.isTipNote){
+        amtText = `${money(r.displayAmount)} (${opts.lang==='he'?'טיפ, לא משפיע על היתרה':'бакшиш, не влияе на баланса'})`;
+      } else {
+        amtText = money(r.rowAmount);
+      }
+      if(r.isBalanceRow) running += r.rowAmount;
+      return `<tr>
+        <td>${toInputDate(r.date)}</td>
+        <td>${r.event}</td>
+        <td class="mono">${r.hours}</td>
+        <td class="mono">${amtText}</td>
+        <td class="mono"><b>${money(running)}</b></td>
+      </tr>`;
+    }).join('');
+
+    const balanceHeader = opts.lang==='he' ? 'יתרה' : 'Баланс';
+    const rowAmountHeader = opts.lang==='he' ? 'סכום שורה' : 'Сума на реда';
+    const openingLabel = opts.lang==='he' ? 'יתרה לפני תחילת התקופה' : 'Баланс преди периода';
+
     bodyHtml = `
       <p><b>${L.timeline}</b></p>
+      <p class="muted">${openingLabel}: <b class="mono">${money(openingBalance)}</b></p>
       <table style="width:100%;">
-        <tr><th style="text-align:${L.align};">${L.date}</th><th style="text-align:${L.align};">${L.event}</th><th style="text-align:${L.align};">${L.hours}</th><th style="text-align:${L.align};">${L.amount}</th></tr>
-        ${rows.map(r=>`<tr><td>${toInputDate(r.date)}</td><td>${r.event}</td><td class="mono">${r.hours}</td><td class="mono">${r.amount}</td></tr>`).join('')}
+        <tr><th style="text-align:${L.align};">${L.date}</th><th style="text-align:${L.align};">${L.event}</th><th style="text-align:${L.align};">${L.hours}</th><th style="text-align:${L.align};">${rowAmountHeader}</th><th style="text-align:${L.align};">${balanceHeader}</th></tr>
+        ${rowsHtml}
       </table>
     `;
   }
