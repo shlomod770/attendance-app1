@@ -11,6 +11,31 @@ function toast(msg){
   setTimeout(()=>t.remove(), 2500);
 }
 
+// Prevents a double-tap from firing an action twice, and shows a clear
+// message if a save fails instead of silently doing nothing.
+function guard(fn){
+  return async function(e){
+    const btn = e && e.currentTarget;
+    if(btn){
+      if(btn.disabled) return;
+      btn.disabled = true;
+      btn.dataset.prevOpacity = btn.style.opacity || '';
+      btn.style.opacity = '0.55';
+    }
+    try{
+      await fn(e);
+    }catch(err){
+      console.error(err);
+      toast('Възникна грешка. Проверете връзката и опитайте отново.');
+    }finally{
+      if(btn){
+        btn.disabled = false;
+        btn.style.opacity = btn.dataset.prevOpacity || '';
+      }
+    }
+  };
+}
+
 function fmtTime(d){ return d.toLocaleTimeString('bg-BG', {hour:'2-digit', minute:'2-digit'}); }
 
 // ---- inactivity auto-reset: any tap anywhere resets the 15s timer ----
@@ -249,7 +274,7 @@ function renderPreviewScreen(subjectLabel, photo, onPhoto){
     </div>
   `;
   document.getElementById('btn-retake').onclick = ()=>renderCaptureScreen(subjectLabel, onPhoto);
-  document.getElementById('btn-confirm').onclick = async ()=>{
+  document.getElementById('btn-confirm').onclick = guard(async ()=>{
     root.innerHTML = `<div class="card center"><p class="muted">Записване...</p></div>`;
     try{
       await onPhoto(photo);
@@ -258,7 +283,7 @@ function renderPreviewScreen(subjectLabel, photo, onPhoto){
       toast('Възникна грешка. Опитайте отново.');
       renderMain();
     }
-  };
+  });
 }
 
 // ---------------- clock in/out ----------------
@@ -275,7 +300,8 @@ async function processScanKiosk(emp, photo){
       employeeId: emp.id,
       checkIn: firebase.firestore.FieldValue.serverTimestamp(),
       checkInPhoto: photo,
-      checkOut: null, needsReview:false, note:'', source:'kiosk'
+      checkOut: null, needsReview:false, note:'', source:'kiosk',
+      ...((emp.pendingApproval || !emp.hourlyRate) ? {} : { rateAtEntry: emp.hourlyRate })
     });
     showResult(true, emp.name, now);
     return;
@@ -309,7 +335,7 @@ function showLongShiftChoiceKiosk(emp, openDoc, checkIn, now, photo){
       <button class="btn btn-ghost" id="btn-choice-newshift" style="margin-top:8px;font-size:17px;padding:16px;">Започвам нова смяна сега</button>
     </div>
   `;
-  document.getElementById('btn-choice-checkout').onclick = async ()=>{
+  document.getElementById('btn-choice-checkout').onclick = guard(async ()=>{
     root.innerHTML = `<div class="card center"><p class="muted">Записване...</p></div>`;
     await db.collection('shifts').doc(openDoc.id).update({
       checkOut: firebase.firestore.FieldValue.serverTimestamp(),
@@ -317,18 +343,19 @@ function showLongShiftChoiceKiosk(emp, openDoc, checkIn, now, photo){
       needsReview: true
     });
     showResult(false, emp.name, now, checkIn);
-  };
-  document.getElementById('btn-choice-newshift').onclick = async ()=>{
+  });
+  document.getElementById('btn-choice-newshift').onclick = guard(async ()=>{
     root.innerHTML = `<div class="card center"><p class="muted">Записване...</p></div>`;
     await db.collection('shifts').doc(openDoc.id).update({ needsReview: true });
     await db.collection('shifts').add({
       employeeId: emp.id,
       checkIn: firebase.firestore.FieldValue.serverTimestamp(),
       checkInPhoto: photo,
-      checkOut: null, needsReview:false, note:'', source:'kiosk'
+      checkOut: null, needsReview:false, note:'', source:'kiosk',
+      ...((emp.pendingApproval || !emp.hourlyRate) ? {} : { rateAtEntry: emp.hourlyRate })
     });
     showResult(true, emp.name, now);
-  };
+  });
 }
 
 function showResult(isCheckIn, name, now, checkIn){
