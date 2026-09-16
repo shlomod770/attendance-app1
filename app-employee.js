@@ -24,6 +24,38 @@ function toast(msg){
   setTimeout(()=>t.remove(), 3000);
 }
 
+// Prevents a double-tap from firing an action twice (e.g. recording a
+// check-in/out twice), and shows a clear message if a save fails instead of
+// silently doing nothing.
+function guard(fn){
+  return async function(e){
+    const btn = e && e.currentTarget;
+    if(btn){
+      if(btn.disabled) return;
+      btn.disabled = true;
+      btn.dataset.prevOpacity = btn.style.opacity || '';
+      btn.style.opacity = '0.55';
+    }
+    try{
+      await fn(e);
+    }catch(err){
+      console.error(err);
+      toast('Възникна грешка. Проверете връзката и опитайте отново.');
+    }finally{
+      if(btn){
+        btn.disabled = false;
+        btn.style.opacity = btn.dataset.prevOpacity || '';
+      }
+    }
+  };
+}
+
+document.addEventListener('focusin', (e)=>{
+  if(e.target && e.target.tagName === 'INPUT' && e.target.type === 'number'){
+    e.target.select();
+  }
+});
+
 // Best-effort location capture. Never blocks the clock-in/out flow —
 // if the person denies permission or it times out, we just proceed without it.
 function getLocation(){
@@ -145,7 +177,7 @@ function renderScan(){
     e.preventDefault();
     document.getElementById('note-box').classList.toggle('hidden');
   };
-  document.getElementById('btn-send-note').onclick = async ()=>{
+  document.getElementById('btn-send-note').onclick = guard(async ()=>{
     const txt = document.getElementById('f-note').value.trim();
     if(!txt) return;
     const loc = await getLocation();
@@ -159,7 +191,7 @@ function renderScan(){
     document.getElementById('f-note').value = '';
     document.getElementById('note-box').classList.add('hidden');
     toast('Съобщението е изпратено');
-  };
+  });
 }
 
 function renderStageButton(){
@@ -263,7 +295,8 @@ async function processScan(){
         checkOut: null,
         needsReview: false,
         note: '',
-        source: 'qr'
+        source: 'qr',
+        ...(currentEmployee.hourlyRate ? { rateAtEntry: currentEmployee.hourlyRate } : {})
       });
       showResult(true, `Час: ${fmtTime(now)}`);
       return;
@@ -314,7 +347,7 @@ function showLongShiftChoice(openDoc, checkIn, now, loc){
       <button class="btn btn-ghost" id="btn-choice-newshift" style="margin-top:8px;">Започвам нова смяна сега</button>
     </div>
   `;
-  document.getElementById('btn-choice-checkout').onclick = async ()=>{
+  document.getElementById('btn-choice-checkout').onclick = guard(async ()=>{
     await db.collection('shifts').doc(openDoc.id).update({
       checkOut: firebase.firestore.FieldValue.serverTimestamp(),
       checkOutLoc: loc,
@@ -328,8 +361,8 @@ function showLongShiftChoice(openDoc, checkIn, now, loc){
       Изход: ${fmtTime(now)}${dayNote}<br>
       <b>Общо часове: ${h} ч ${m} мин</b>
     `);
-  };
-  document.getElementById('btn-choice-newshift').onclick = async ()=>{
+  });
+  document.getElementById('btn-choice-newshift').onclick = guard(async ()=>{
     await db.collection('shifts').doc(openDoc.id).update({ needsReview: true });
     await db.collection('shifts').add({
       employeeId: currentEmployee.id,
@@ -338,10 +371,11 @@ function showLongShiftChoice(openDoc, checkIn, now, loc){
       checkOut: null,
       needsReview: false,
       note: '',
-      source: 'qr'
+      source: 'qr',
+      ...(currentEmployee.hourlyRate ? { rateAtEntry: currentEmployee.hourlyRate } : {})
     });
     showResult(true, `Час: ${fmtTime(now)}`);
-  };
+  });
 }
 
 function showResult(isCheckIn, bodyHtml){
@@ -392,7 +426,7 @@ async function processFixedShiftScan(now, loc){
       </div>
     `;
     document.getElementById('btn-no').onclick = renderStageButton;
-    document.getElementById('btn-yes').onclick = async ()=>{
+    document.getElementById('btn-yes').onclick = guard(async ()=>{
       const { start, end } = computeScheduledTimes(currentEmployee, now);
       await db.collection('shifts').add({
         employeeId: currentEmployee.id,
@@ -404,10 +438,11 @@ async function processFixedShiftScan(now, loc){
         scheduledEnd: firebase.firestore.Timestamp.fromDate(end),
         needsReview: false,
         note: '',
-        source: 'qr'
+        source: 'qr',
+        ...(currentEmployee.hourlyRate ? { rateAtEntry: currentEmployee.hourlyRate } : {})
       });
       showResult(true, `Смяна ${label}<br>Час на влизане: ${fmtTime(now)}`);
-    };
+    });
     return;
   }
 
@@ -430,7 +465,7 @@ async function processFixedShiftScan(now, loc){
         <button class="btn btn-primary" id="btn-confirm-out" style="margin-top:14px;">Потвърди</button>
       </div>
     `;
-    document.getElementById('btn-confirm-out').onclick = async ()=>{
+    document.getElementById('btn-confirm-out').onclick = guard(async ()=>{
       const overtimeMinutes = parseInt(document.getElementById('f-overtime').value, 10) || 0;
       await db.collection('shifts').doc(openDoc.id).update({
         checkOut: firebase.firestore.FieldValue.serverTimestamp(),
@@ -439,7 +474,7 @@ async function processFixedShiftScan(now, loc){
       });
       const otText = overtimeMinutes ? `<br>Извънреден труд: ${overtimeMinutes} мин.` : '';
       showResult(false, `Смяна ${label}<br>Час на излизане: ${fmtTime(now)}${otText}`);
-    };
+    });
   };
 }
 
