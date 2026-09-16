@@ -26,6 +26,43 @@ function toast(msg){
   setTimeout(()=>t.remove(), 2600);
 }
 
+// Wraps a button's async click handler so that:
+// 1. Rapid double-clicks/double-taps can't fire it twice (which, for money
+//    actions like recording a payment, could otherwise create a duplicate).
+// 2. If the save fails (lost connection, permission error, etc.) the person
+//    sees a clear message instead of the button just silently doing nothing.
+function guard(fn){
+  return async function(e){
+    const btn = e && e.currentTarget;
+    if(btn){
+      if(btn.disabled) return; // already in progress — ignore the extra tap
+      btn.disabled = true;
+      btn.dataset.prevOpacity = btn.style.opacity || '';
+      btn.style.opacity = '0.55';
+    }
+    try{
+      await fn(e);
+    }catch(err){
+      console.error(err);
+      toast('משהו השתבש בשמירה. בדקו את החיבור לאינטרנט ונסו שוב.');
+    }finally{
+      if(btn){
+        btn.disabled = false;
+        btn.style.opacity = btn.dataset.prevOpacity || '';
+      }
+    }
+  };
+}
+
+// Whenever a number field (amount, rate, hours, minutes, etc.) gets focus,
+// select its whole current value — so typing a new number just replaces it
+// instead of requiring the person to manually delete digits first.
+document.addEventListener('focusin', (e)=>{
+  if(e.target && e.target.tagName === 'INPUT' && e.target.type === 'number'){
+    e.target.select();
+  }
+});
+
 function copyToClipboard(text){
   const done = ()=>toast('הועתק! אפשר להדביק בוואטסאפ, מייל וכו\'');
   if(navigator.clipboard && navigator.clipboard.writeText){
@@ -182,7 +219,7 @@ function shiftExceptionReasons(s){
   if(s.checkIn && !s.checkOut){
     const inD = s.checkIn.toDate ? s.checkIn.toDate() : new Date(s.checkIn);
     const hrs = (new Date() - inD) / 3600000;
-    if(hrs > LONG_SHIFT_HOURS && !s.needsReview) reasons.push(`משמרת פתוחה כבר ${fmtHours(hrs)} שעות`);
+    if(hrs > LONG_SHIFT_HOURS) reasons.push(`משמרת פתוחה כבר ${fmtHours(hrs)} שעות`);
   }
   if(s.checkIn && s.checkOut && !s.isFixedShift){
     const hrs = shiftDurationHours(s);
@@ -232,33 +269,42 @@ function paymentEffectiveDate(p){
   return p.date && p.date.toDate ? p.date.toDate() : new Date(p.date);
 }
 
+// The rate that was actually in effect when this shift happened — not whatever
+// the employee's rate happens to be today. Falls back to the employee's current
+// rate only for old shifts recorded before this field existed.
+function shiftRate(s, emp){
+  return s.rateAtEntry != null ? s.rateAtEntry : (emp ? (emp.hourlyRate||0) : 0);
+}
+function shiftEarned(s, emp){
+  return shiftDurationHours(s) * shiftRate(s, emp);
+}
+
 // ---------- lifetime (global) balance — the single clear "how much do I owe now" number ----------
 function employeeLifetimeStats(empId){
-  const rate = (state.employees.find(e=>e.id===empId)||{}).hourlyRate || 0;
-  const hours = state.shifts
-    .filter(s=>s.employeeId===empId && isCountable(s))
-    .reduce((sum,s)=>sum+shiftDurationHours(s), 0);
+  const emp = state.employees.find(e=>e.id===empId);
+  const countable = state.shifts.filter(s=>s.employeeId===empId && isCountable(s));
+  const hours = countable.reduce((sum,s)=>sum+shiftDurationHours(s), 0);
+  const earned = countable.reduce((sum,s)=>sum+shiftEarned(s,emp), 0);
   const paid = state.payments.filter(p=>p.employeeId===empId && !p.isTip).reduce((s,p)=>s+(p.amount||0),0);
-  const earned = hours*rate;
   return { hours, earned, paid, remaining: earned-paid };
 }
 
 // ---------- range stats (for week/month/year "how much for this range" info panels) ----------
 function statsForRange(empId, startDate, endDateExcl){
-  const rate = (state.employees.find(e=>e.id===empId)||{}).hourlyRate || 0;
+  const emp = state.employees.find(e=>e.id===empId);
   const shifts = state.shifts.filter(s=>{
     if(s.employeeId !== empId || !isCountable(s)) return false;
     const d = shiftEffectiveDate(s);
     return d && d >= startDate && d < endDateExcl;
   });
   const hours = shifts.reduce((s,sh)=>s+shiftDurationHours(sh),0);
+  const earned = shifts.reduce((s,sh)=>s+shiftEarned(sh,emp),0);
   const pays = state.payments.filter(p=>{
     if(p.employeeId !== empId || p.isTip || p.isAdjustment) return false;
     const d = paymentEffectiveDate(p);
     return d && d >= startDate && d < endDateExcl;
   });
   const paid = pays.reduce((s,p)=>s+(p.amount||0),0);
-  const earned = hours*rate;
   return { hours, earned, paid, shifts, payments: pays };
 }
 
@@ -267,12 +313,36 @@ function statsForRange(empId, startDate, endDateExcl){
 // it won't keep growing just because more days have passed in an in-progress week.
 // Use this to answer "what did I owe as of the end of last week", separate from
 // "what do I owe right now including the days that have happened since".
-function statsUpTo(empId, cutoff){
-  const rate = (state.employees.find(e=>e.id===empId)||{}).hourlyRate || 0;
-  const hours = state.shifts
+// Same idea as statsUpTo, but specifically for the itemized report (buildAndShowSlip):
+// that report lists payments by their REAL paid-on date, so its opening balance
+// must use that same rule for payments — not the "which week is this tagged to"
+// rule that statsUpTo/statsForRange use elsewhere. Mixing the two was exactly
+// what caused a payment to be counted both in the opening balance AND again as
+// its own row whenever its tagged week and its real date fell on opposite sides
+// of the report's start date.
+function reportOpeningBalance(empId, cutoff){
+  const emp = state.employees.find(e=>e.id===empId);
+  const shifts = state.shifts
     .filter(s=>s.employeeId===empId && isCountable(s))
-    .filter(s=>{ const d = shiftEffectiveDate(s); return d && d < cutoff; })
-    .reduce((sum,s)=>sum+shiftDurationHours(s), 0);
+    .filter(s=>{ const d = shiftEffectiveDate(s); return d && d < cutoff; });
+  const earned = shifts.reduce((sum,s)=>sum+shiftEarned(s,emp), 0);
+  const paid = state.payments
+    .filter(p=>p.employeeId===empId && !p.isTip)
+    .filter(p=>{
+      const d = p.date && p.date.toDate ? p.date.toDate() : (p.date ? new Date(p.date) : null);
+      return d && d < cutoff;
+    })
+    .reduce((s,p)=>s+(p.amount||0),0);
+  return { remaining: earned - paid };
+}
+
+function statsUpTo(empId, cutoff){
+  const emp = state.employees.find(e=>e.id===empId);
+  const shifts = state.shifts
+    .filter(s=>s.employeeId===empId && isCountable(s))
+    .filter(s=>{ const d = shiftEffectiveDate(s); return d && d < cutoff; });
+  const hours = shifts.reduce((sum,s)=>sum+shiftDurationHours(s), 0);
+  const earned = shifts.reduce((sum,s)=>sum+shiftEarned(s,emp), 0);
   const paid = state.payments
     .filter(p=>p.employeeId===empId && !p.isTip)
     // Strictly "before the cutoff", full stop — including debt closures. This has
@@ -282,7 +352,6 @@ function statsUpTo(empId, cutoff){
     // lists that same payment as its own row (e.g. the itemized report).
     .filter(p=>{ const d = paymentEffectiveDate(p); return d && d < cutoff; })
     .reduce((s,p)=>s+(p.amount||0),0);
-  const earned = hours*rate;
   return { hours, earned, paid, remaining: earned-paid };
 }
 // Same as the employee-card figure below, but specifically "does this debt
@@ -364,7 +433,7 @@ function renderGate(){
       <p class="muted" id="gate-err" style="margin-top:8px;"></p>
     </div>
   `;
-  document.getElementById('btn-enter').onclick = async ()=>{
+  document.getElementById('btn-enter').onclick = guard(async ()=>{
     const email = document.getElementById('f-email').value.trim();
     const password = document.getElementById('f-password').value;
     const errEl = document.getElementById('gate-err');
@@ -376,7 +445,7 @@ function renderGate(){
     }catch(err){
       errEl.textContent = 'אימייל או סיסמה שגויים.';
     }
-  };
+  });
 }
 
 // ---------- app shell ----------
@@ -636,19 +705,19 @@ function renderPayroll(){
     const r = rows.find(x=>x.emp.id===b.dataset.fillCumulative);
     document.querySelector(`[data-amt="${r.emp.id}"]`).value = r.cumulative>0?r.cumulative.toFixed(2):0;
   });
-  cont.querySelectorAll('[data-pay]').forEach(b=>b.onclick=async()=>{
+  cont.querySelectorAll('[data-pay]').forEach(b=>b.onclick=guard(async()=>{
     const empId = b.dataset.pay;
     const amt = parseFloat(document.querySelector(`[data-amt="${empId}"]`).value) || 0;
     const tip = parseFloat(document.querySelector(`[data-tip="${empId}"]`).value) || 0;
     if(amt<=0 && tip<=0){ toast('נא להזין סכום'); return; }
     await payOne(empId, amt, tip);
     await loadAll(); renderPayroll(); toast('התשלום נשמר');
-  });
+  }));
   cont.querySelectorAll('[data-open]').forEach(b=>b.onclick=()=>{
     state.tab='employees'; state.detailEmployeeId = b.dataset.open; renderApp();
   });
 
-  document.getElementById('btn-pay-all').onclick = async ()=>{
+  document.getElementById('btn-pay-all').onclick = guard(async ()=>{
     const toPay = rows.filter(r=>{
       const amt = parseFloat(document.querySelector(`[data-amt="${r.emp.id}"]`).value) || 0;
       const tip = parseFloat(document.querySelector(`[data-tip="${r.emp.id}"]`).value) || 0;
@@ -662,7 +731,7 @@ function renderPayroll(){
       await payOne(r.emp.id, amt, tip);
     }
     await loadAll(); renderPayroll(); toast('כל התשלומים נשמרו');
-  };
+  });
 }
 
 // ---------- employees list ----------
@@ -730,10 +799,10 @@ function renderEmployees(){
         <button class="btn btn-ghost btn-sm" data-restore="${e.id}">הפעלה מחדש</button>
       </div>
     `).join('');
-    aCont.querySelectorAll('[data-restore]').forEach(b=>b.onclick=async()=>{
+    aCont.querySelectorAll('[data-restore]').forEach(b=>b.onclick=guard(async()=>{
       await db.collection('employees').doc(b.dataset.restore).update({active:true});
       await loadAll(); renderApp();
-    });
+    }));
   }
 
   const list = document.getElementById('emp-list');
@@ -837,20 +906,20 @@ function renderNewEmployees(){
       </div>
     </div>
   `).join('');
-  list.querySelectorAll('[data-approve]').forEach(b=>b.onclick=async()=>{
+  list.querySelectorAll('[data-approve]').forEach(b=>b.onclick=guard(async()=>{
     const rate = parseFloat(document.querySelector(`[data-rate="${b.dataset.approve}"]`).value) || 0;
     await db.collection('employees').doc(b.dataset.approve).update({
       hourlyRate: rate,
       pendingApproval: firebase.firestore.FieldValue.delete()
     });
     await loadAll(); renderApp(); toast('העובד אושר');
-  });
+  }));
   list.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>openEmployeeForm(b.dataset.edit));
-  list.querySelectorAll('[data-reject]').forEach(b=>b.onclick=async()=>{
+  list.querySelectorAll('[data-reject]').forEach(b=>b.onclick=guard(async()=>{
     if(!confirm('למחוק את הרישום הזה לגמרי?')) return;
     await db.collection('employees').doc(b.dataset.reject).delete();
     await loadAll(); renderApp();
-  });
+  }));
 }
 
 function openEmployeeForm(empId){
@@ -953,7 +1022,7 @@ function openEmployeeForm(empId){
     else renderEmployees();
   };
   document.getElementById('btn-cancel-emp').onclick = goBack;
-  document.getElementById('btn-save-emp').onclick = async ()=>{
+  document.getElementById('btn-save-emp').onclick = guard(async ()=>{
     const newPin = document.getElementById('f-pin').value.trim();
     const wt = document.getElementById('f-worktype').value;
     const data = {
@@ -969,8 +1038,12 @@ function openEmployeeForm(empId){
     if(wt==='phone'){
       data.shiftType = document.getElementById('f-shifttype').value;
       if(data.shiftType==='fixed'){
-        data.fixedShiftStart = document.getElementById('f-fixed-start').value;
-        data.fixedShiftEnd = document.getElementById('f-fixed-end').value;
+        const fStart = document.getElementById('f-fixed-start').value;
+        const fEnd = document.getElementById('f-fixed-end').value;
+        if(!fStart || !fEnd){ toast('נא למלא שעת התחלה ושעת סיום למשמרת הקבועה'); return; }
+        if(fStart === fEnd){ toast('שעת ההתחלה והסיום זהות — נא לבדוק את השעות'); return; }
+        data.fixedShiftStart = fStart;
+        data.fixedShiftEnd = fEnd;
       } else if(emp){
         data.fixedShiftStart = firebase.firestore.FieldValue.delete();
         data.fixedShiftEnd = firebase.firestore.FieldValue.delete();
@@ -978,6 +1051,13 @@ function openEmployeeForm(empId){
     }
     if(pendingPhoto) data.profilePhoto = pendingPhoto;
     if(!data.name || (wt==='phone' && !data.username) || (wt==='phone' && !newPin && !(emp&&emp.pin))){ toast('נא למלא את כל השדות (כולל קוד אישי)'); return; }
+    if(wt==='phone'){
+      const dupe = state.employees.find(e=>e.id!==empId && e.workType!=='kiosk' && (e.username||'').trim().toLowerCase()===data.username.trim().toLowerCase());
+      if(dupe){ toast(`שם המשתמש הזה כבר תפוס על ידי ${displayName(dupe)} — כניסה תיכשל לאחד מהם`); return; }
+    }
+    if(data.hourlyRate <= 0){
+      if(!confirm('שכר לשעה הוא 0 או שלילי — זה נראה כמו טעות. להמשיך בכל זאת?')) return;
+    }
     if(wt==='phone' && newPin){
       data.pin = newPin;
       if(emp && emp.pinHash) data.pinHash = firebase.firestore.FieldValue.delete(); // no longer used — the code is visible to the admin now
@@ -994,7 +1074,7 @@ function openEmployeeForm(empId){
     state.detailEmployeeId = id;
     renderApp();
     toast('נשמר');
-  };
+  });
 }
 
 // ---------- employee detail (central hub) ----------
@@ -1061,16 +1141,16 @@ function renderEmployeeDetail(empId){
 
   document.getElementById('back-link').onclick = (e)=>{ e.preventDefault(); state.detailEmployeeId=null; renderApp(); };
   document.getElementById('btn-edit-emp').onclick = ()=>openEmployeeForm(emp.id);
-  document.getElementById('btn-reset-dev').onclick = async ()=>{
+  document.getElementById('btn-reset-dev').onclick = guard(async ()=>{
     if(!confirm('לאפס את שיוך המכשיר של העובד?')) return;
     await db.collection('employees').doc(emp.id).update({deviceId: firebase.firestore.FieldValue.delete()});
     await loadAll(); renderEmployeeDetail(empId); toast('המכשיר אופס');
-  };
-  document.getElementById('btn-toggle-active').onclick = async ()=>{
+  });
+  document.getElementById('btn-toggle-active').onclick = guard(async ()=>{
     await db.collection('employees').doc(emp.id).update({active: emp.active===false ? true : false});
     await loadAll(); renderEmployeeDetail(empId);
-  };
-  document.getElementById('btn-delete-emp').onclick = async ()=>{
+  });
+  document.getElementById('btn-delete-emp').onclick = guard(async ()=>{
     if(!confirm(`למחוק את ${displayName(emp)} לצמיתות? זה ימחק גם את כל היסטוריית המשמרות, התשלומים וההערות שלו/שלה. הפעולה בלתי הפיכה — אם לא בטוחים, עדיף "השבתה" במקום.`)) return;
     if(!confirm('אישור אחרון: למחוק לצמיתות?')) return;
     const empShifts = state.shifts.filter(s=>s.employeeId===emp.id);
@@ -1084,7 +1164,7 @@ function renderEmployeeDetail(empId){
     state.detailEmployeeId = null;
     renderApp();
     toast('העובד נמחק לצמיתות');
-  };
+  });
   document.getElementById('btn-add-payment').onclick = ()=>openPaymentForm(emp.id, null);
   document.getElementById('btn-quick').onclick = ()=>openQuickEntry(empId);
   document.getElementById('btn-detail').onclick = ()=>openDetailEntry(empId);
@@ -1097,18 +1177,21 @@ function renderEmployeeDetail(empId){
 // "when did they come in, when did I pay them, when did they get a tip".
 function employeeTimelineItems(empId){
   const items = [];
+  const empForRate = state.employees.find(e=>e.id===empId);
   state.shifts.filter(s=>s.employeeId===empId).forEach(s=>{
     const d = shiftEffectiveDate(s) || new Date(0);
     let label, sub;
+    const rateNote = (s.rateAtEntry != null && empForRate && s.rateAtEntry !== empForRate.hourlyRate)
+      ? ` <span class="muted">(תעריף אז: ${money(s.rateAtEntry)}/שעה)</span>` : '';
     if(s.manualTotalHours != null){
-      label = 'הזנה ידנית'; sub = `${fmtHours(s.manualTotalHours)} שעות`;
+      label = 'הזנה ידנית'; sub = `${fmtHours(s.manualTotalHours)} שעות${rateNote}`;
     } else if(s.isFixedShift){
       const inD = s.checkIn ? (s.checkIn.toDate?s.checkIn.toDate():new Date(s.checkIn)) : null;
       const outD = s.checkOut ? (s.checkOut.toDate?s.checkOut.toDate():new Date(s.checkOut)) : null;
       const schedStart = s.scheduledStart ? (s.scheduledStart.toDate?s.scheduledStart.toDate():new Date(s.scheduledStart)) : null;
       const schedEnd = s.scheduledEnd ? (s.scheduledEnd.toDate?s.scheduledEnd.toDate():new Date(s.scheduledEnd)) : null;
       label = (outD ? 'משמרת קבועה' : 'משמרת קבועה — פתוחה') + ' ⏱️';
-      sub = schedStart && schedEnd ? `משמרת מוגדרת: ${fmtTimeHe(schedStart)}–${fmtTimeHe(schedEnd)} (${fmtHours((schedEnd-schedStart)/3600000)} ש')` : '';
+      sub = schedStart && schedEnd ? `משמרת מוגדרת: ${fmtTimeHe(schedStart)}–${fmtTimeHe(schedEnd)} (${fmtHours((schedEnd-schedStart)/3600000)} ש')${rateNote}` : '';
       if(s.overtimeMinutes) sub += ` + ${s.overtimeMinutes} דק' נוספות`;
       sub += `<br><span class="muted">סריקה בפועל: כניסה ${inD?fmtTimeHe(inD):'—'}${outD?` → יציאה ${fmtTimeHe(outD)}`:''}</span>`;
       if(s.needsReview) sub += ' <span class="tag tag-review">דורש בדיקה</span>';
@@ -1118,7 +1201,7 @@ function employeeTimelineItems(empId){
       const srcTag = s.source==='kiosk' ? '🖥️' : '📱';
       label = (outD ? 'משמרת' : 'כניסה — משמרת פתוחה') + ' ' + srcTag;
       sub = inD ? `כניסה ${fmtTimeHe(inD)}${locLink(s.checkInLoc,'מיקום')}` : '';
-      if(outD) sub += ` ← יציאה ${fmtTimeHe(outD)}${locLink(s.checkOutLoc,'מיקום')} · ${fmtHours(shiftDurationHours(s))} שעות`;
+      if(outD) sub += ` ← יציאה ${fmtTimeHe(outD)}${locLink(s.checkOutLoc,'מיקום')} · ${fmtHours(shiftDurationHours(s))} שעות${rateNote}`;
       if(s.needsReview) sub += ' <span class="tag tag-review">דורש בדיקה</span>';
       if(s.checkInPhoto || s.checkOutPhoto) sub += ` <button class="btn btn-ghost btn-sm" data-view-photo="${s.id}" style="padding:2px 8px;">📷 תמונות</button>`;
     }
@@ -1294,10 +1377,10 @@ function buildAndShowSlip(empId, rangeStart, rangeEndExcl, titleLine, backFn, op
     // balance that continues from the employee's real debt as of right before
     // this report's date range — not reset to zero — so a discrepancy can be
     // traced to the exact row where it appears.
-    const rate = emp.hourlyRate || 0;
     const rows = [];
     shifts.forEach(s=>{
       const d = shiftEffectiveDate(s);
+      const rate = shiftRate(s, emp);
       if(s.manualTotalHours!=null){
         let weekLabel = '';
         if(s.periodKey){
@@ -1327,7 +1410,7 @@ function buildAndShowSlip(empId, rangeStart, rangeEndExcl, titleLine, backFn, op
     });
     rows.sort((a,b)=>a.date-b.date);
 
-    const openingBalance = statsUpTo(empId, rangeStart).remaining;
+    const openingBalance = reportOpeningBalance(empId, rangeStart).remaining;
     let running = openingBalance;
     const rowsHtml = rows.map(r=>{
       let amtText;
@@ -1477,19 +1560,19 @@ function openEditShift(shiftId, empId, returnTo){
       </div>
     `;
     document.getElementById('btn-cancel').onclick = goBack;
-    document.getElementById('btn-save').onclick = async ()=>{
+    document.getElementById('btn-save').onclick = guard(async ()=>{
       const h = parseFloat(document.getElementById('f-h').value) || 0;
       const m = parseFloat(document.getElementById('f-m').value) || 0;
       const hours = h + (m/60);
       if(hours<=0){ toast('נא להזין שעות ו/או דקות'); return; }
       await db.collection('shifts').doc(shiftId).update({manualTotalHours: hours});
       await loadAll(); goBack(); toast('נשמר');
-    };
-    document.getElementById('btn-del').onclick = async ()=>{
+    });
+    document.getElementById('btn-del').onclick = guard(async ()=>{
       if(!confirm('למחוק רישום זה?')) return;
       await db.collection('shifts').doc(shiftId).delete();
       await loadAll(); goBack();
-    };
+    });
     return;
   }
   const inD = s.checkIn.toDate ? s.checkIn.toDate() : new Date(s.checkIn);
@@ -1516,16 +1599,16 @@ function openEditShift(shiftId, empId, returnTo){
     </div>
   `;
   document.getElementById('btn-cancel').onclick = goBack;
-  document.getElementById('btn-clear-out').onclick = async ()=>{
+  document.getElementById('btn-clear-out').onclick = guard(async ()=>{
     await db.collection('shifts').doc(shiftId).update({checkOut:null, needsReview:false});
     await loadAll(); goBack(); toast('שעת היציאה נוקתה — המשמרת פתוחה כעת');
-  };
-  document.getElementById('btn-del').onclick = async ()=>{
+  });
+  document.getElementById('btn-del').onclick = guard(async ()=>{
     if(!confirm('למחוק את המשמרת הזו לגמרי?')) return;
     await db.collection('shifts').doc(shiftId).delete();
     await loadAll(); goBack();
-  };
-  document.getElementById('btn-save').onclick = async ()=>{
+  });
+  document.getElementById('btn-save').onclick = guard(async ()=>{
     const dateStr = document.getElementById('f-date').value;
     const inTime = document.getElementById('f-in').value;
     const outTime = document.getElementById('f-out').value;
@@ -1541,7 +1624,7 @@ function openEditShift(shiftId, empId, returnTo){
     }
     await db.collection('shifts').doc(shiftId).update(update);
     await loadAll(); goBack(); toast('נשמר');
-  };
+  });
 }
 
 function toInputDate(d){
@@ -1584,18 +1667,20 @@ function openQuickEntry(empId){
   document.getElementById('btn-prev-w').onclick = ()=>{ state.periodOffset++; openQuickEntry(empId); };
   document.getElementById('btn-next-w').onclick = ()=>{ if(state.periodOffset>0){ state.periodOffset--; openQuickEntry(empId); } };
   document.getElementById('btn-cancel').onclick = ()=>renderEmployeeDetail(empId);
-  document.getElementById('btn-save').onclick = async ()=>{
+  document.getElementById('btn-save').onclick = guard(async ()=>{
     const h = parseFloat(document.getElementById('f-h').value) || 0;
     const m = parseFloat(document.getElementById('f-m').value) || 0;
     const hours = h + (m/60);
     if(hours <= 0){ toast('נא להזין שעות ו/או דקות'); return; }
     const targetWeek = periodStartAtOffset(state.periodOffset);
+    const emp = state.employees.find(e=>e.id===empId);
     await db.collection('shifts').add({
       employeeId: empId, manualTotalHours: hours, periodKey: periodKeyOf(targetWeek),
-      checkIn: null, checkOut: null, needsReview:false, note:'הזנה מהירה'
+      checkIn: null, checkOut: null, needsReview:false, note:'הזנה מהירה',
+      ...(emp && emp.hourlyRate ? { rateAtEntry: emp.hourlyRate } : {})
     });
     await loadAll(); renderEmployeeDetail(empId); toast('נשמר על השבוע: ' + fmtDateHe(targetWeek) + ' – ' + fmtDateHe(addDays(targetWeek,6)));
-  };
+  });
 }
 
 function openDetailEntry(empId){
@@ -1617,7 +1702,7 @@ function openDetailEntry(empId){
     </div>
   `;
   document.getElementById('btn-cancel').onclick = ()=>renderEmployeeDetail(empId);
-  document.getElementById('btn-save').onclick = async ()=>{
+  document.getElementById('btn-save').onclick = guard(async ()=>{
     const dateStr = document.getElementById('f-date').value;
     const inTime = document.getElementById('f-in').value;
     const outTime = document.getElementById('f-out').value;
@@ -1625,14 +1710,16 @@ function openDetailEntry(empId){
     const inD = new Date(`${dateStr}T${inTime}:00`);
     let outD = new Date(`${dateStr}T${outTime}:00`);
     if(outD <= inD) outD = addDays(outD, 1);
+    const emp = state.employees.find(e=>e.id===empId);
     await db.collection('shifts').add({
       employeeId: empId,
       checkIn: firebase.firestore.Timestamp.fromDate(inD),
       checkOut: firebase.firestore.Timestamp.fromDate(outD),
-      needsReview: false, note:'הזנה ידנית'
+      needsReview: false, note:'הזנה ידנית',
+      ...(emp && emp.hourlyRate ? { rateAtEntry: emp.hourlyRate } : {})
     });
     await loadAll(); renderEmployeeDetail(empId); toast('נשמר');
-  };
+  });
 }
 
 function openPaymentForm(empId, paymentId, isNav){
@@ -1709,14 +1796,14 @@ function openPaymentForm(empId, paymentId, isNav){
       document.getElementById('f-amount').value = life.remaining>0?life.remaining.toFixed(2):0;
     };
   } else {
-    document.getElementById('btn-del').onclick = async ()=>{
+    document.getElementById('btn-del').onclick = guard(async ()=>{
       if(!confirm('למחוק תשלום זה?')) return;
       await db.collection('payments').doc(existing.id).delete();
       await loadAll(); renderEmployeeDetail(empId);
-    };
+    });
   }
   document.getElementById('btn-cancel').onclick = ()=>renderEmployeeDetail(empId);
-  document.getElementById('btn-save').onclick = async ()=>{
+  document.getElementById('btn-save').onclick = guard(async ()=>{
     const amount = parseFloat(document.getElementById('f-amount').value);
     const dateStr = document.getElementById('f-date').value;
     const type = document.getElementById('f-type').value;
@@ -1745,7 +1832,7 @@ function openPaymentForm(empId, paymentId, isNav){
     }
     await loadAll(); renderEmployeeDetail(empId);
     toast(type==='tip' ? 'הטיפ נשמר' : type==='adjustment' ? 'החוב נסגר' : 'נשמר');
-  };
+  });
 }
 
 // ---------- log (all check-ins / check-outs) ----------
@@ -1791,7 +1878,7 @@ function renderLog(){
   root.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>{ state.logView=b.dataset.view; renderLog(); });
   document.getElementById('btn-prev').onclick = ()=>{ state.logOffset++; renderLog(); };
   document.getElementById('btn-next').onclick = ()=>{ if(state.logOffset>0){ state.logOffset--; renderLog(); } };
-  document.getElementById('btn-refresh-log').onclick = async ()=>{ await loadAll(); renderLog(); toast('עודכן'); };
+  document.getElementById('btn-refresh-log').onclick = guard(async ()=>{ await loadAll(); renderLog(); toast('עודכן'); });
 
   let rows = state.shifts.filter(s=>{
     if(state.logEmployeeId !== 'all' && s.employeeId !== state.logEmployeeId) return false;
@@ -1900,7 +1987,7 @@ function renderExceptions(){
     </div>
     <div id="exc-list"></div>
   `;
-  document.getElementById('btn-refresh').onclick = async ()=>{ await loadAll(); renderExceptions(); toast('עודכן'); };
+  document.getElementById('btn-refresh').onclick = guard(async ()=>{ await loadAll(); renderExceptions(); toast('עודכן'); });
 
   const cont = document.getElementById('exc-list');
   if(!items.length){
@@ -1938,18 +2025,18 @@ function renderExceptions(){
     </div>`;
   }).join('');
 
-  cont.querySelectorAll('[data-approve]').forEach(b=>b.onclick=async()=>{
+  cont.querySelectorAll('[data-approve]').forEach(b=>b.onclick=guard(async()=>{
     await db.collection('shifts').doc(b.dataset.approve).update({ exceptionDismissed:true, needsReview:false });
     await loadAll(); renderExceptions(); toast('אושר');
-  });
+  }));
   cont.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>{
     openEditShift(b.dataset.edit, b.dataset.emp, renderExceptions);
   });
-  cont.querySelectorAll('[data-del]').forEach(b=>b.onclick=async()=>{
+  cont.querySelectorAll('[data-del]').forEach(b=>b.onclick=guard(async()=>{
     if(!confirm('למחוק את המשמרת הזו?')) return;
     await db.collection('shifts').doc(b.dataset.del).delete();
     await loadAll(); renderExceptions();
-  });
+  }));
 }
 
 // ---------- global payments log ----------
@@ -1975,7 +2062,7 @@ function renderPayments(){
     </div>
     <div id="pay-groups"></div>
   `;
-  document.getElementById('btn-refresh').onclick = async ()=>{ await loadAll(); renderPayments(); toast('עודכן'); };
+  document.getElementById('btn-refresh').onclick = guard(async ()=>{ await loadAll(); renderPayments(); toast('עודכן'); });
 
   const cont = document.getElementById('pay-groups');
   if(!sorted.length){
@@ -2199,14 +2286,14 @@ function renderQr(){
     </div>
   `;
   new QRCode(document.getElementById('qr-canvas'), { text: state.config.qrToken, width:220, height:220 });
-  document.getElementById('btn-new-qr').onclick = async ()=>{
+  document.getElementById('btn-new-qr').onclick = guard(async ()=>{
     if(!confirm('להפיק קוד חדש? הקוד הישן יפסיק לעבוד מיידית.')) return;
     const token = genToken();
     await db.collection('config').doc('main').update({qrToken: token});
     state.config.qrToken = token;
     renderQr();
     toast('קוד חדש הופק');
-  };
+  });
   document.getElementById('btn-print-qr').onclick = ()=>window.print();
 }
 
@@ -2301,7 +2388,7 @@ function renderSettings(){
     </div>
   `;
   renderTabOrderList();
-  document.getElementById('btn-change-pass').onclick = async ()=>{
+  document.getElementById('btn-change-pass').onclick = guard(async ()=>{
     const currentPass = document.getElementById('f-current-pass').value;
     const newPass = document.getElementById('f-new-pass').value;
     const msg = document.getElementById('pass-msg');
@@ -2319,13 +2406,13 @@ function renderSettings(){
     }catch(err){
       msg.textContent = 'הסיסמה הנוכחית שגויה, או שגיאה אחרת.';
     }
-  };
-  document.getElementById('btn-save-day').onclick = async ()=>{
+  });
+  document.getElementById('btn-save-day').onclick = guard(async ()=>{
     const v = parseInt(document.getElementById('f-startday').value,10);
     await db.collection('config').doc('main').update({periodStartDay:v});
     state.config.periodStartDay = v;
     toast('נשמר');
-  };
+  });
   let pendingLoc = biz || null;
   document.getElementById('btn-use-here').onclick = ()=>{
     if(!navigator.geolocation){ toast('הדפדפן לא תומך במיקום'); return; }
@@ -2335,7 +2422,7 @@ function renderSettings(){
       ()=>{ toast('לא ניתן היה לאתר מיקום'); }
     );
   };
-  document.getElementById('btn-save-biz').onclick = async ()=>{
+  document.getElementById('btn-save-biz').onclick = guard(async ()=>{
     const radius = parseInt(document.getElementById('f-radius').value,10) || 150;
     if(!pendingLoc){ toast('יש קודם ללחוץ על "השתמש במיקום הנוכחי שלי"'); return; }
     await db.collection('config').doc('main').update({businessLocation: pendingLoc, businessRadius: radius});
@@ -2343,8 +2430,8 @@ function renderSettings(){
     state.config.businessRadius = radius;
     renderSettings();
     toast('מיקום העסק נשמר');
-  };
-  document.getElementById('btn-clean-photos').onclick = async ()=>{
+  });
+  document.getElementById('btn-clean-photos').onclick = guard(async ()=>{
     const months = parseInt(document.getElementById('f-clean-months').value,10) || 1;
     const cutoff = addMonths(new Date(), -months);
     const targets = state.shifts.filter(s=>{
@@ -2361,7 +2448,7 @@ function renderSettings(){
     }
     await loadAll();
     toast(`נמחקו תמונות מ-${targets.length} משמרות`);
-  };
+  });
   document.getElementById('btn-backup').onclick = ()=>{
     const data = { employees: state.employees, shifts: state.shifts, payments: state.payments, notes: state.notes, config: state.config, exportedAt: new Date().toISOString() };
     const blob = new Blob([JSON.stringify(data,null,2)], {type:'application/json'});
@@ -2370,10 +2457,10 @@ function renderSettings(){
     a.download = `גיבוי-${dateKey(new Date())}.json`;
     a.click();
   };
-  document.getElementById('btn-logout-admin').onclick = async ()=>{
+  document.getElementById('btn-logout-admin').onclick = guard(async ()=>{
     await firebase.auth().signOut();
     // onAuthStateChanged in boot() will notice and show the login screen
-  };
+  });
 }
 
 boot();
