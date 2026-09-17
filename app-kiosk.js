@@ -38,18 +38,34 @@ function guard(fn){
 
 function fmtTime(d){ return d.toLocaleTimeString('bg-BG', {hour:'2-digit', minute:'2-digit'}); }
 
-// ---- inactivity auto-reset: any tap anywhere resets the 15s timer ----
+// ---- inactivity auto-reset ----
 // This only ever calls our own renderMain() function — never location.reload()
 // or a real page refresh — so no camera permission prompts or flicker.
+//
+// The timeout length depends on what screen we're on: a short 15s on screens
+// where nothing more is expected of the person (the very first "start" screen,
+// or a final confirmation that's about to auto-advance anyway) — but a much
+// more generous window while they're actively doing something that takes real
+// time, like typing a name or getting ready for a photo, so we don't wipe out
+// half-typed work.
+let idleTimeoutMs = 15000;
+function setIdleTimeout(ms){
+  idleTimeoutMs = ms;
+  armIdleTimer();
+}
 function armIdleTimer(){
   clearTimeout(idleTimer);
   idleTimer = setTimeout(()=>{
     stopCamera();
     renderMain();
-  }, 15000);
+  }, idleTimeoutMs);
 }
+// Any tap AND any typing counts as activity — typing alone (with no clicks in
+// between) used to let the timer expire mid-sentence, which was the actual bug.
 document.addEventListener('click', armIdleTimer, true);
 document.addEventListener('touchstart', armIdleTimer, true);
+document.addEventListener('input', armIdleTimer, true);
+document.addEventListener('keydown', armIdleTimer, true);
 
 function stopCamera(){
   if(stream){
@@ -79,7 +95,7 @@ async function loadKioskEmployees(){
 
 // ---- Main screen: same look as the phone app's scan button ----
 function renderMain(){
-  armIdleTimer();
+  setIdleTimeout(15000);
   root.classList.add('center-content');
   root.innerHTML = `
     <button class="stamp" id="btn-shift">
@@ -100,7 +116,7 @@ function renderMain(){
 
 // ---- Employee picker grid: fetched fresh only when opened, not on every idle reset ----
 async function renderPicker(){
-  armIdleTimer();
+  setIdleTimeout(30000);
   root.classList.remove('center-content');
   root.innerHTML = `<div class="card center"><p class="muted">Зареждане...</p></div>`;
   await loadKioskEmployees();
@@ -130,7 +146,7 @@ async function renderPicker(){
 }
 
 function renderConfirm(emp){
-  armIdleTimer();
+  setIdleTimeout(20000);
   root.innerHTML = `
     <div class="card center">
       ${emp.profilePhoto?`<img src="${emp.profilePhoto}" style="width:90px;height:90px;object-fit:cover;border-radius:14px;margin-bottom:10px;">`:''}
@@ -152,7 +168,7 @@ function renderConfirm(emp){
 // ---------------- new employee registration ----------------
 
 function renderNewEmployeeForm(){
-  armIdleTimer();
+  setIdleTimeout(120000);
   root.classList.remove('center-content');
   root.innerHTML = `
     <div class="card">
@@ -201,7 +217,7 @@ async function registerEmployee(name, employmentType, photo){
 
 // Registration never auto-starts a shift — we ask explicitly.
 function renderStartShiftPrompt(emp){
-  armIdleTimer();
+  setIdleTimeout(25000);
   root.innerHTML = `
     <div class="card center">
       <h2 style="font-size:22px;">${emp.name} е записан(а) успешно ✓</h2>
@@ -230,7 +246,7 @@ function capturePhotoFlow(subjectLabel, refPhoto, onPhoto){
 }
 
 async function renderCaptureScreen(subjectLabel, onPhoto){
-  armIdleTimer();
+  setIdleTimeout(60000);
   root.innerHTML = `
     <div class="card center">
       <h2 style="font-size:20px;">${subjectLabel}</h2>
@@ -262,7 +278,7 @@ async function renderCaptureScreen(subjectLabel, onPhoto){
 }
 
 function renderPreviewScreen(subjectLabel, photo, onPhoto){
-  armIdleTimer();
+  setIdleTimeout(20000);
   root.innerHTML = `
     <div class="card center">
       <h2 style="font-size:20px;">${subjectLabel}</h2>
