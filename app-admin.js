@@ -157,9 +157,18 @@ async function refreshWeeklySummary(){
       .filter(e=>e.payCycle!=='flexible')
       .map(e=>{
         const st = statsForRange(e.id, weekStart, weekEnd);
-        return { name: displayName(e), hours: Math.round(st.hours*100)/100, toPay: Math.round((st.earned-st.paid)*100)/100 };
+        const netThisWeek = st.earned - st.paid;
+        const carryover = statsUpTo(e.id, weekStart).remaining;
+        const totalToPayNow = carryover + netThisWeek;
+        return {
+          name: displayName(e),
+          hours: Math.round(st.hours*100)/100,
+          thisWeek: Math.round(netThisWeek*100)/100,
+          carryover: Math.round(carryover*100)/100,
+          toPay: Math.round(Math.max(0,totalToPayNow)*100)/100
+        };
       })
-      .filter(r => r.hours > 0 || r.toPay !== 0);
+      .filter(r => r.hours > 0 || r.thisWeek !== 0 || r.carryover !== 0);
 
     const flexibleEmployees = active
       .filter(e=>e.payCycle==='flexible')
@@ -170,6 +179,7 @@ async function refreshWeeklySummary(){
       .filter(r => r.totalOwed !== 0);
 
     const totalToPay = weeklyEmployees.reduce((s,r)=>s+r.toPay, 0);
+    const totalThisWeekOnly = weeklyEmployees.reduce((s,r)=>s+Math.max(0,r.thisWeek), 0);
     const totalHours = weeklyEmployees.reduce((s,r)=>s+r.hours, 0);
     const totalFlexibleOwed = flexibleEmployees.reduce((s,r)=>s+r.totalOwed, 0);
 
@@ -179,6 +189,7 @@ async function refreshWeeklySummary(){
       weekLabel: `${fmtDateHe(weekStart)} – ${fmtDateHe(addDays(weekStart,6))}`,
       weeklyEmployees, flexibleEmployees,
       totalToPay: Math.round(totalToPay*100)/100,
+      totalThisWeekOnly: Math.round(totalThisWeekOnly*100)/100,
       totalHours: Math.round(totalHours*100)/100,
       totalFlexibleOwed: Math.round(totalFlexibleOwed*100)/100
     });
@@ -579,18 +590,21 @@ function renderPayroll(){
 
   const allRows = active.map(e=>{
     const st = statsForRange(e.id, weekStart, weekEnd);
-    const remaining = Math.max(0, st.earned - st.paid);
-    // Cumulative debt frozen at the END of this specific week — includes any older
-    // unpaid weeks, but never includes anything from after this week, so it doesn't
-    // shift around just because more days passed since.
-    const cumulative = Math.max(0, statsUpTo(e.id, weekEnd).remaining);
-    return { emp:e, ...st, remaining, cumulative };
+    const netThisWeek = st.earned - st.paid; // this week only, can be negative if overpaid this week specifically
+    // Carryover: the balance as it stood strictly BEFORE this week started — can be
+    // positive (still owed from earlier) or negative (paid in advance / overpaid),
+    // and we deliberately do NOT hide the negative case, since that's exactly the
+    // "I gave someone more than they were owed last week" scenario that needs to
+    // visibly reduce what they're owed now, not just vanish.
+    const carryover = statsUpTo(e.id, weekStart).remaining;
+    const totalToPayNow = carryover + netThisWeek;
+    return { emp:e, ...st, remaining: Math.max(0,netThisWeek), netThisWeek, carryover, totalToPayNow };
   });
-  // Only show people who actually need to be paid something — no point cluttering
-  // this screen with employees who have zero balance for this week and no old debt.
-  const rows = allRows.filter(r => r.remaining > 0.005 || r.cumulative > 0.005);
-  const totalThisWeek = rows.reduce((s,r)=>s+r.remaining,0);
-  const totalCumulative = rows.reduce((s,r)=>s+r.cumulative,0);
+  // Only show people who actually have something going on — either this week's
+  // work/payment, or a carried-over balance (owed or credited) from before.
+  const rows = allRows.filter(r => Math.abs(r.netThisWeek) > 0.005 || Math.abs(r.carryover) > 0.005);
+  const totalThisWeek = rows.reduce((s,r)=>s+Math.max(0,r.netThisWeek),0);
+  const totalCumulative = rows.reduce((s,r)=>s+Math.max(0,r.totalToPayNow),0);
 
   root.innerHTML = `
     <div class="card no-print">
@@ -606,8 +620,8 @@ function renderPayroll(){
       <button class="btn btn-ghost btn-sm" id="btn-copy-summary" style="margin-top:10px;">📋 העתקת סיכום (לוואטסאפ/מייל)</button>
     </div>
     <div class="card">
-      <div class="row between"><span class="muted">רק השבוע הזה</span><b class="mono">${money(totalThisWeek)}</b></div>
-      <div class="row between"><span class="muted">סה"כ כולל חובות ישנים (עד סוף השבוע הזה)</span><b class="mono">${money(totalCumulative)}</b></div>
+      <div class="row between"><span class="muted">רק השבוע הזה (טרי)</span><b class="mono">${money(totalThisWeek)}</b></div>
+      <div class="row between"><span class="muted">סה"כ לתשלום בפועל (כולל יתרות ישנות)</span><b class="mono">${money(totalCumulative)}</b></div>
       <button class="btn btn-brass" id="btn-pay-all" style="margin-top:10px;">שלם לכולם לפי "סכום לתשלום" למטה</button>
     </div>
     <div id="payroll-rows"></div>
@@ -624,9 +638,14 @@ function renderPayroll(){
   document.getElementById('btn-copy-summary').onclick = ()=>{
     const lines = [`סגירת שבוע — ${fmtDateHe(weekStart)} עד ${fmtDateHe(addDays(weekStart,6))}`, ''];
     rows.forEach(r=>{
-      lines.push(`${displayName(r.emp)}: ${fmtHours(r.hours)} שעות · לשלם ${money(r.remaining)}`);
+      let line = `${displayName(r.emp)}: ${fmtHours(r.hours)} שעות · השבוע ${money(r.netThisWeek)}`;
+      if(Math.abs(r.carryover) > 0.005){
+        line += r.carryover>0 ? ` · חוב ישן ${money(r.carryover)}` : ` · מקדמה ביתר ${money(Math.abs(r.carryover))}`;
+      }
+      line += ` · לתשלום עכשיו: ${money(Math.max(0,r.totalToPayNow))}`;
+      lines.push(line);
     });
-    lines.push('', `סה"כ לשלם השבוע: ${money(totalThisWeek)}`);
+    lines.push('', `סה"כ טרי לשבוע: ${money(totalThisWeek)}`, `סה"כ לתשלום בפועל (כולל יתרות ישנות): ${money(totalCumulative)}`);
     if(flexibleEmployees.length){
       lines.push('', 'עובדים בתשלום גמיש:');
       flexibleEmployees.forEach(e=>{
@@ -661,18 +680,27 @@ function renderPayroll(){
     cont.innerHTML = '<div class="card"><p class="muted">אין כרגע אף אחד שצריך לשלם לו — כל היתרות בשבוע הזה על אפס. 🎉</p></div>';
     return;
   }
-  cont.innerHTML = rows.map(r=>`
+  cont.innerHTML = rows.map(r=>{
+    const carryoverBox = Math.abs(r.carryover) > 0.005 ? `
+      <div class="row between" style="background:${r.carryover>0?'#F9E4DE':'#E4F1E9'};padding:8px 10px;border-radius:8px;margin-top:8px;">
+        <span>${r.carryover>0 ? '⚠️ חוב משבועות קודמים' : '✅ מקדמה ששולמה ביתר (זכות לעובד)'}</span>
+        <b class="mono">${money(Math.abs(r.carryover))}</b>
+      </div>` : '';
+    return `
     <div class="card">
       <div class="row between"><b>${displayName(r.emp)}</b><span class="mono">${fmtHours(r.hours)} ש'</span></div>
       <div class="row between muted"><span>הגיע השבוע (${money(r.emp.hourlyRate)}/שעה)</span><span class="mono">${money(r.earned)}</span></div>
       <div class="row between muted"><span>כבר שולם השבוע</span><span class="mono">${money(r.paid)}</span></div>
-      <div class="row between"><b>נותר רק לשבוע הזה</b><b class="mono">${money(r.remaining)}</b></div>
-      <div class="row between muted" style="font-size:12px;"><span>סה"כ כולל חובות ישנים</span><span class="mono">${money(r.cumulative)}</span></div>
+      <div class="row between"><b>נותר לשבוע זה בלבד</b><b class="mono">${money(r.netThisWeek)}</b></div>
+      ${carryoverBox}
+      <div class="divider"></div>
+      <div class="row between"><b style="font-size:17px;">סה"כ לתשלום עכשיו</b><b class="mono" style="font-size:17px;">${money(Math.max(0,r.totalToPayNow))}</b></div>
       <div class="divider"></div>
       <div class="row between" style="margin-top:6px;">
         <label style="margin:0;">סכום לתשלום עכשיו</label>
         <input data-amt="${r.emp.id}" type="number" step="0.01" value="${r.remaining>0?r.remaining.toFixed(2):0}" style="width:110px;text-align:left;">
       </div>
+      <p class="muted" style="font-size:11px;margin:2px 0 0;">ברירת המחדל היא רק השבוע הטרי — אם רוצים לכלול גם את היתרה הישנה, לחצו "מלא לפי הסכום הכולל".</p>
       <div class="row between" style="margin-top:6px;">
         <label style="margin:0;">+ טיפ (לא נכנס לחוב)</label>
         <input data-tip="${r.emp.id}" type="number" step="0.01" value="0" style="width:110px;text-align:left;">
@@ -683,7 +711,8 @@ function renderPayroll(){
         <button class="btn btn-ghost btn-sm" data-open="${r.emp.id}">פתח כרטיס עובד</button>
       </div>
     </div>
-  `).join('');
+  `;
+  }).join('');
 
   async function payOne(empId, amt, tip){
     if(amt > 0){
@@ -703,7 +732,8 @@ function renderPayroll(){
 
   cont.querySelectorAll('[data-fill-cumulative]').forEach(b=>b.onclick=()=>{
     const r = rows.find(x=>x.emp.id===b.dataset.fillCumulative);
-    document.querySelector(`[data-amt="${r.emp.id}"]`).value = r.cumulative>0?r.cumulative.toFixed(2):0;
+    const v = Math.max(0, r.totalToPayNow);
+    document.querySelector(`[data-amt="${r.emp.id}"]`).value = v>0?v.toFixed(2):0;
   });
   cont.querySelectorAll('[data-pay]').forEach(b=>b.onclick=guard(async()=>{
     const empId = b.dataset.pay;
