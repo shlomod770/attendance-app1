@@ -636,22 +636,35 @@ function renderPayroll(){
   document.getElementById('btn-prev').onclick = ()=>{ state.payrollOffset++; renderPayroll(); };
   document.getElementById('btn-next').onclick = ()=>{ if(state.payrollOffset>0){ state.payrollOffset--; renderPayroll(); } };
   document.getElementById('btn-copy-summary').onclick = ()=>{
-    const lines = [`סגירת שבוע — ${fmtDateHe(weekStart)} עד ${fmtDateHe(addDays(weekStart,6))}`, ''];
+    const lines = [
+      `📋 *סגירת שבוע*`,
+      `${fmtDateHe(weekStart)} – ${fmtDateHe(addDays(weekStart,6))}`,
+      ''
+    ];
     rows.forEach(r=>{
-      let line = `${displayName(r.emp)}: ${fmtHours(r.hours)} שעות · השבוע ${money(r.netThisWeek)}`;
+      lines.push(`👤 ${displayName(r.emp)}`);
+      lines.push(`   שעות: ${fmtHours(r.hours)}`);
+      lines.push(`   השבוע: ${money(r.netThisWeek)}`);
       if(Math.abs(r.carryover) > 0.005){
-        line += r.carryover>0 ? ` · חוב ישן ${money(r.carryover)}` : ` · מקדמה ביתר ${money(Math.abs(r.carryover))}`;
+        lines.push(r.carryover>0
+          ? `   ⚠️ חוב ישן: ${money(r.carryover)}`
+          : `   ✅ מקדמה ביתר (זכות): ${money(Math.abs(r.carryover))}`);
       }
-      line += ` · לתשלום עכשיו: ${money(Math.max(0,r.totalToPayNow))}`;
-      lines.push(line);
+      lines.push(`   💶 לתשלום עכשיו: ${money(Math.max(0,r.totalToPayNow))}`);
+      lines.push('');
     });
-    lines.push('', `סה"כ טרי לשבוע: ${money(totalThisWeek)}`, `סה"כ לתשלום בפועל (כולל יתרות ישנות): ${money(totalCumulative)}`);
+    lines.push('----------------------------');
+    lines.push(`סה"כ טרי לשבוע: ${money(totalThisWeek)}`);
+    lines.push(`סה"כ לתשלום בפועל (כולל יתרות ישנות): ${money(totalCumulative)}`);
     if(flexibleEmployees.length){
-      lines.push('', 'עובדים בתשלום גמיש:');
+      const flexLines = [];
       flexibleEmployees.forEach(e=>{
         const life = employeeLifetimeStats(e.id);
-        if(life.remaining > 0.005) lines.push(`${displayName(e)}: סה"כ נותר ${money(life.remaining)}`);
+        if(life.remaining > 0.005) flexLines.push(`👤 ${displayName(e)}: ${money(life.remaining)}`);
       });
+      if(flexLines.length){
+        lines.push('', '----------------------------', '📆 עובדים בתשלום גמיש (לא שבועי):', ...flexLines);
+      }
     }
     copyToClipboard(lines.join('\n'));
   };
@@ -681,11 +694,22 @@ function renderPayroll(){
     return;
   }
   cont.innerHTML = rows.map(r=>{
-    const carryoverBox = Math.abs(r.carryover) > 0.005 ? `
-      <div class="row between" style="background:${r.carryover>0?'#F9E4DE':'#E4F1E9'};padding:8px 10px;border-radius:8px;margin-top:8px;">
-        <span>${r.carryover>0 ? '⚠️ חוב משבועות קודמים' : '✅ מקדמה ששולמה ביתר (זכות לעובד)'}</span>
-        <b class="mono">${money(Math.abs(r.carryover))}</b>
-      </div>` : '';
+    const alreadyCovered = r.carryover > 0 && r.totalToPayNow <= 0.005;
+    let carryoverBox = '';
+    if(Math.abs(r.carryover) > 0.005){
+      if(alreadyCovered){
+        carryoverBox = `
+        <div class="row between" style="background:#E4F1E9;padding:8px 10px;border-radius:8px;margin-top:8px;">
+          <span>✅ היה חוב ישן ${money(r.carryover)} — כבר כוסה במלואו על ידי התשלום שנרשם השבוע</span>
+        </div>`;
+      } else {
+        carryoverBox = `
+        <div class="row between" style="background:${r.carryover>0?'#F9E4DE':'#E4F1E9'};padding:8px 10px;border-radius:8px;margin-top:8px;">
+          <span>${r.carryover>0 ? '⚠️ חוב משבועות קודמים' : '✅ מקדמה ששולמה ביתר (זכות לעובד)'}</span>
+          <b class="mono">${money(Math.abs(r.carryover))}</b>
+        </div>`;
+      }
+    }
     return `
     <div class="card">
       <div class="row between"><b>${displayName(r.emp)}</b><span class="mono">${fmtHours(r.hours)} ש'</span></div>
@@ -705,6 +729,11 @@ function renderPayroll(){
         <label style="margin:0;">+ טיפ (לא נכנס לחוב)</label>
         <input data-tip="${r.emp.id}" type="number" step="0.01" value="0" style="width:110px;text-align:left;">
       </div>
+      <div class="row between" style="margin-top:10px;background:var(--paper-2);padding:8px 10px;border-radius:8px;">
+        <label style="margin:0;font-size:13px;">💵 כמה נתת בפועל ביד?</label>
+        <input data-given="${r.emp.id}" type="number" step="0.01" placeholder="לדוגמה 140" style="width:110px;text-align:left;">
+      </div>
+      <button class="btn btn-ghost btn-sm" data-autotip="${r.emp.id}" style="margin-top:6px;">↳ חשב את ההפרש אוטומטית כטיפ</button>
       <div class="row" style="margin-top:10px;">
         <button class="btn btn-primary btn-sm" data-pay="${r.emp.id}">שלם</button>
         <button class="btn btn-ghost btn-sm" data-fill-cumulative="${r.emp.id}">מלא לפי הסכום הכולל</button>
@@ -734,6 +763,23 @@ function renderPayroll(){
     const r = rows.find(x=>x.emp.id===b.dataset.fillCumulative);
     const v = Math.max(0, r.totalToPayNow);
     document.querySelector(`[data-amt="${r.emp.id}"]`).value = v>0?v.toFixed(2):0;
+  });
+  cont.querySelectorAll('[data-autotip]').forEach(b=>b.onclick=()=>{
+    const empId = b.dataset.autotip;
+    const given = parseFloat(document.querySelector(`[data-given="${empId}"]`).value);
+    const amtInput = document.querySelector(`[data-amt="${empId}"]`);
+    const tipInput = document.querySelector(`[data-tip="${empId}"]`);
+    if(isNaN(given)){ toast('נא להזין כמה נתת בפועל'); return; }
+    const owed = parseFloat(amtInput.value) || 0;
+    // Round to the cent to avoid ugly floating-point remainders like 15.999999999998
+    const diff = Math.round((given - owed) * 100) / 100;
+    if(diff <= 0){
+      tipInput.value = 0;
+      toast('הסכום שנתת לא גבוה מהסכום לתשלום — אין טיפ לחשב');
+      return;
+    }
+    tipInput.value = diff.toFixed(2);
+    toast(`חושב: ${diff.toFixed(2)} € יירשמו כטיפ`);
   });
   cont.querySelectorAll('[data-pay]').forEach(b=>b.onclick=guard(async()=>{
     const empId = b.dataset.pay;
