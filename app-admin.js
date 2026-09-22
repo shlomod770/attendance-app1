@@ -695,53 +695,55 @@ function renderPayroll(){
   }
   cont.innerHTML = rows.map(r=>{
     const alreadyCovered = r.carryover > 0 && r.totalToPayNow <= 0.005;
-    let carryoverBox = '';
+    let carryoverBadge = '';
     if(Math.abs(r.carryover) > 0.005){
       if(alreadyCovered){
-        carryoverBox = `
-        <div class="row between" style="background:#E4F1E9;padding:8px 10px;border-radius:8px;margin-top:8px;">
-          <span>✅ היה חוב ישן ${money(r.carryover)} — כבר כוסה במלואו על ידי התשלום שנרשם השבוע</span>
-        </div>`;
+        carryoverBadge = ` <span class="tag" style="background:#E4F1E9;color:#3e7c59;">✅ חוב ישן כוסה</span>`;
+      } else if(r.carryover > 0){
+        carryoverBadge = ` <span class="tag tag-review">⚠️ +${money(r.carryover)} ישן</span>`;
       } else {
-        carryoverBox = `
-        <div class="row between" style="background:${r.carryover>0?'#F9E4DE':'#E4F1E9'};padding:8px 10px;border-radius:8px;margin-top:8px;">
-          <span>${r.carryover>0 ? '⚠️ חוב משבועות קודמים' : '✅ מקדמה ששולמה ביתר (זכות לעובד)'}</span>
-          <b class="mono">${money(Math.abs(r.carryover))}</b>
-        </div>`;
+        carryoverBadge = ` <span class="tag" style="background:#E4F1E9;color:#3e7c59;">✅ זכות ${money(Math.abs(r.carryover))}</span>`;
       }
     }
     return `
-    <div class="card">
-      <div class="row between"><b>${displayName(r.emp)}</b><span class="mono">${fmtHours(r.hours)} ש'</span></div>
-      <div class="row between muted"><span>הגיע השבוע (${money(r.emp.hourlyRate)}/שעה)</span><span class="mono">${money(r.earned)}</span></div>
-      <div class="row between muted"><span>כבר שולם השבוע</span><span class="mono">${money(r.paid)}</span></div>
-      <div class="row between"><b>נותר לשבוע זה בלבד</b><b class="mono">${money(r.netThisWeek)}</b></div>
-      ${carryoverBox}
-      <div class="divider"></div>
-      <div class="row between"><b style="font-size:17px;">סה"כ לתשלום עכשיו</b><b class="mono" style="font-size:17px;">${money(Math.max(0,r.totalToPayNow))}</b></div>
-      <div class="divider"></div>
-      <div class="row between" style="margin-top:6px;">
-        <label style="margin:0;">סכום לתשלום עכשיו</label>
-        <input data-amt="${r.emp.id}" type="number" step="0.01" value="${r.remaining>0?r.remaining.toFixed(2):0}" style="width:110px;text-align:left;">
+    <div class="card" style="padding:12px 14px;">
+      <div class="row between">
+        <div>
+          <b style="font-size:14px;">${displayName(r.emp)}</b>
+          <span class="muted" style="font-size:12px;">· ${fmtHours(r.hours)} ש'</span>
+          ${carryoverBadge}
+        </div>
+        <b class="mono" style="font-size:15px;">${money(Math.max(0,r.totalToPayNow))}</b>
       </div>
-      <p class="muted" style="font-size:11px;margin:2px 0 0;">ברירת המחדל היא רק השבוע הטרי — אם רוצים לכלול גם את היתרה הישנה, לחצו "מלא לפי הסכום הכולל".</p>
-      <div class="row between" style="margin-top:6px;">
-        <label style="margin:0;">+ טיפ (לא נכנס לחוב)</label>
-        <input data-tip="${r.emp.id}" type="number" step="0.01" value="0" style="width:110px;text-align:left;">
+      <div class="row" style="margin-top:8px;gap:6px;align-items:center;">
+        <input data-amt="${r.emp.id}" type="number" step="0.01" value="${r.remaining>0?r.remaining.toFixed(2):0}" style="width:90px;text-align:left;padding:8px;font-size:13px;">
+        <button class="btn btn-primary btn-sm" data-pay="${r.emp.id}" style="flex:1;">שלם</button>
+        <button class="btn btn-ghost btn-sm" data-toggle-more="${r.emp.id}" style="padding:8px 10px;">⋯</button>
       </div>
-      <div class="row between" style="margin-top:10px;background:var(--paper-2);padding:8px 10px;border-radius:8px;">
-        <label style="margin:0;font-size:13px;">💵 כמה נתת בפועל ביד?</label>
-        <input data-given="${r.emp.id}" type="number" step="0.01" placeholder="לדוגמה 140" style="width:110px;text-align:left;">
-      </div>
-      <button class="btn btn-ghost btn-sm" data-autotip="${r.emp.id}" style="margin-top:6px;">↳ חשב את ההפרש אוטומטית כטיפ</button>
-      <div class="row" style="margin-top:10px;">
-        <button class="btn btn-primary btn-sm" data-pay="${r.emp.id}">שלם</button>
-        <button class="btn btn-ghost btn-sm" data-fill-cumulative="${r.emp.id}">מלא לפי הסכום הכולל</button>
-        <button class="btn btn-ghost btn-sm" data-open="${r.emp.id}">פתח כרטיס עובד</button>
+      <div id="more-${r.emp.id}" class="hidden" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line);">
+        <div class="row between muted" style="font-size:12px;"><span>הגיע השבוע (${money(r.emp.hourlyRate)}/שעה)</span><span class="mono">${money(r.earned)}</span></div>
+        <div class="row between muted" style="font-size:12px;"><span>כבר שולם השבוע</span><span class="mono">${money(r.paid)}</span></div>
+        <div class="row between" style="margin-top:6px;">
+          <label style="margin:0;font-size:12px;">+ טיפ (לא נכנס לחוב)</label>
+          <input data-tip="${r.emp.id}" type="number" step="0.01" value="0" style="width:90px;text-align:left;padding:6px;font-size:13px;">
+        </div>
+        <div class="row between" style="margin-top:6px;background:var(--paper-2);padding:6px 8px;border-radius:8px;">
+          <label style="margin:0;font-size:12px;">💵 נתת בפועל ביד?</label>
+          <input data-given="${r.emp.id}" type="number" step="0.01" placeholder="140" style="width:90px;text-align:left;padding:6px;font-size:13px;">
+        </div>
+        <div class="row" style="margin-top:6px;flex-wrap:wrap;">
+          <button class="btn btn-ghost btn-sm" data-autotip="${r.emp.id}">↳ חשב הפרש כטיפ</button>
+          <button class="btn btn-ghost btn-sm" data-fill-cumulative="${r.emp.id}">מלא לפי הסכום הכולל</button>
+          <button class="btn btn-ghost btn-sm" data-open="${r.emp.id}">פתח כרטיס עובד</button>
+        </div>
       </div>
     </div>
   `;
   }).join('');
+
+  cont.querySelectorAll('[data-toggle-more]').forEach(b=>b.onclick=()=>{
+    document.getElementById('more-'+b.dataset.toggleMore).classList.toggle('hidden');
+  });
 
   async function payOne(empId, amt, tip){
     if(amt > 0){
