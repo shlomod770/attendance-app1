@@ -400,6 +400,71 @@ function hasReviewShift(empId){
   return state.shifts.some(s=>s.employeeId===empId && s.needsReview);
 }
 
+// ---------- flexible employees: monthly tracking (additive — does not touch core calc) ----------
+// Calendar-month view for employees on "flexible" pay: hours, earned, paid, and what's
+// left to pay at month end. Uses the existing statsForRange/statsUpTo, so numbers always
+// agree with the rest of the app.
+function flexMonthStats(empId, offset){
+  const start = addMonths(startOfMonth(new Date()), -offset);
+  const end = addMonths(start, 1);
+  const st = statsForRange(empId, start, end);
+  // debt closures ("סגירת חוב") dated inside this month — statsForRange ignores them
+  const adjust = state.payments
+    .filter(p=>p.employeeId===empId && p.isAdjustment && !p.isTip)
+    .filter(p=>{ const d = paymentEffectiveDate(p); return d && d >= start && d < end; })
+    .reduce((s,p)=>s+(p.amount||0),0);
+  const carryover = statsUpTo(empId, start).remaining; // balance before this month began
+  const remaining = carryover + st.earned - st.paid - adjust;
+  return { start, end, hours: st.hours, earned: st.earned, paid: st.paid, adjust, carryover, remaining };
+}
+// Optional fixed-installment plan, e.g. {d1:10,a1:500,d2:20,a2:500}. The 3rd payment
+// (end of month) is not stored — it is simply whatever is left, by hours.
+function getMonthlyPlan(emp){
+  const p = emp && emp.monthlyPlan;
+  if(!p) return null;
+  const a1 = parseFloat(p.a1)||0, a2 = parseFloat(p.a2)||0;
+  if(a1<=0 && a2<=0) return null;
+  return { d1: parseInt(p.d1)||10, a1, d2: parseInt(p.d2)||20, a2 };
+}
+function flexMonthHtml(empId, offset, withNav){
+  const emp = state.employees.find(e=>e.id===empId);
+  const m = flexMonthStats(empId, offset);
+  const plan = getMonthlyPlan(emp);
+  const label = m.start.toLocaleDateString('he-IL',{month:'long',year:'numeric'});
+  const now = new Date();
+  let planHtml = '';
+  if(plan){
+    let cum = 0;
+    const rows = [[plan.d1,plan.a1],[plan.d2,plan.a2]].filter(x=>x[1]>0).map(([day,amt])=>{
+      cum += amt;
+      const covered = m.paid >= cum - 0.005;
+      const due = new Date(m.start.getFullYear(), m.start.getMonth(), day);
+      const late = !covered && (offset>0 || now >= due);
+      const tag = covered ? '<span class="tag" style="background:#E4F1E9;color:#3e7c59;">✅ שולם</span>'
+                : late ? '<span class="tag tag-review">⚠️ טרם שולם</span>'
+                : '<span class="tag">⏳ בהמשך</span>';
+      return `<div class="row between" style="font-size:13px;margin-top:4px;"><span>תשלום קבוע ב-${day} לחודש: <b class="mono">${money(amt)}</b></span>${tag}</div>`;
+    }).join('');
+    planHtml = `<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--line);">
+      ${rows}
+      <div class="row between" style="font-size:13px;margin-top:4px;"><span>תשלום אחרון (סוף החודש, לפי שעות)</span><b class="mono">${money(Math.max(0,m.remaining))}</b></div>
+    </div>`;
+  }
+  return `
+    <div class="row between">
+      <h3 style="font-size:15px;">📆 מעקב חודשי</h3>
+      ${withNav ? `<div class="row" style="gap:6px;"><button class="btn btn-ghost btn-sm" data-flexm="prev">›</button><b>${label}</b><button class="btn btn-ghost btn-sm" data-flexm="next" ${offset===0?'disabled style="opacity:.3"':''}>‹</button></div>` : `<span class="muted">${label}</span>`}
+    </div>
+    <div class="row between" style="margin-top:8px;"><span>שעות החודש</span><b class="mono">${fmtHours(m.hours)}</b></div>
+    <div class="row between"><span>הגיע החודש</span><b class="mono">${money(m.earned)}</b></div>
+    <div class="row between"><span>שולם החודש</span><b class="mono">${money(m.paid)}</b></div>
+    ${Math.abs(m.adjust)>0.005 ? `<div class="row between"><span>חוב שנסגר החודש</span><b class="mono">${money(m.adjust)}</b></div>` : ''}
+    ${Math.abs(m.carryover)>0.005 ? `<div class="row between muted"><span>${m.carryover>0?'חוב מחודשים קודמים':'זכות מחודשים קודמים'}</span><span class="mono">${money(Math.abs(m.carryover))}</span></div>` : ''}
+    <div class="row between" style="margin-top:6px;"><b>נותר לשלם עד סוף החודש</b><b class="mono">${money(m.remaining)}</b></div>
+    ${planHtml}
+  `;
+}
+
 // ---------- gate ----------
 async function boot(){
   firebase.auth().onAuthStateChanged(async (user)=>{
@@ -676,6 +741,7 @@ function renderPayroll(){
       return `<div class="card">
         <div class="row between"><b>${displayName(e)}</b><span class="mono">${fmtHours(life.hours)} ש' סה"כ</span></div>
         <div class="row between"><b>סה"כ נותר לשלם</b><b class="mono">${money(life.remaining)}</b></div>
+        <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line);">${flexMonthHtml(e.id, 0, false)}</div>
         <div class="row" style="margin-top:10px;">
           <button class="btn btn-primary btn-sm" data-flex-pay="${e.id}">רישום תשלום</button>
           <button class="btn btn-ghost btn-sm" data-flex-open="${e.id}">פתח כרטיס עובד</button>
@@ -1049,6 +1115,17 @@ function openEmployeeForm(empId){
         <option value="weekly" ${(!emp||emp.payCycle!=='flexible')?'selected':''}>שבועי (מופיע ב"סגירת שבוע")</option>
         <option value="flexible" ${emp&&emp.payCycle==='flexible'?'selected':''}>גמיש — דו-שבועי / חודשי / לא קבוע</option>
       </select>
+      <div id="plan-fields" style="background:var(--paper-2);padding:10px;border-radius:10px;margin-top:8px;">
+        <p class="muted" style="font-size:12px;margin:0 0 6px;">הסדר תשלום חודשי (אופציונלי): שני תשלומים קבועים. התשלום השלישי (סוף החודש) הוא תמיד היתרה לפי השעות.</p>
+        <div class="row">
+          <div style="flex:1;"><label>תשלום 1 — יום בחודש</label><input id="f-d1" type="number" min="1" max="31" value="${emp&&emp.monthlyPlan&&emp.monthlyPlan.d1?emp.monthlyPlan.d1:10}"></div>
+          <div style="flex:1;"><label>סכום (€)</label><input id="f-a1" type="number" step="0.01" value="${emp&&emp.monthlyPlan&&emp.monthlyPlan.a1?emp.monthlyPlan.a1:''}"></div>
+        </div>
+        <div class="row">
+          <div style="flex:1;"><label>תשלום 2 — יום בחודש</label><input id="f-d2" type="number" min="1" max="31" value="${emp&&emp.monthlyPlan&&emp.monthlyPlan.d2?emp.monthlyPlan.d2:20}"></div>
+          <div style="flex:1;"><label>סכום (€)</label><input id="f-a2" type="number" step="0.01" value="${emp&&emp.monthlyPlan&&emp.monthlyPlan.a2?emp.monthlyPlan.a2:''}"></div>
+        </div>
+      </div>
       <label>תמונת פרופיל (אופציונלי)</label>
       <input id="f-photo" type="file" accept="image/*">
       <div id="photo-preview" style="margin-top:8px;">${pendingPhoto?`<img src="${pendingPhoto}" style="width:80px;height:80px;object-fit:cover;border-radius:10px;">`:''}</div>
@@ -1069,6 +1146,10 @@ function openEmployeeForm(empId){
   const syncShiftTypeUi = ()=>{
     fixedShiftFields.style.display = document.getElementById('f-shifttype').value==='fixed' ? '' : 'none';
   };
+  const planFields = document.getElementById('plan-fields');
+  const syncPlanUi = ()=>{ planFields.style.display = document.getElementById('f-paycycle').value==='flexible' ? '' : 'none'; };
+  document.getElementById('f-paycycle').onchange = syncPlanUi;
+  syncPlanUi();
   document.getElementById('f-worktype').onchange = syncTypeUi;
   document.getElementById('f-shifttype').onchange = syncShiftTypeUi;
   syncTypeUi();
@@ -1127,6 +1208,17 @@ function openEmployeeForm(empId){
         data.fixedShiftEnd = firebase.firestore.FieldValue.delete();
       }
     }
+    if(data.payCycle==='flexible'){
+      const a1 = parseFloat(document.getElementById('f-a1').value) || 0;
+      const a2 = parseFloat(document.getElementById('f-a2').value) || 0;
+      const d1 = parseInt(document.getElementById('f-d1').value) || 10;
+      const d2 = parseInt(document.getElementById('f-d2').value) || 20;
+      if(d1<1||d1>31||d2<1||d2>31){ toast('יום בחודש חייב להיות בין 1 ל-31'); return; }
+      if(a1>0 || a2>0) data.monthlyPlan = { d1, a1, d2, a2 };
+      else if(emp && emp.monthlyPlan) data.monthlyPlan = firebase.firestore.FieldValue.delete();
+    } else if(emp && emp.monthlyPlan){
+      data.monthlyPlan = firebase.firestore.FieldValue.delete();
+    }
     if(pendingPhoto) data.profilePhoto = pendingPhoto;
     if(!data.name || (wt==='phone' && !data.username) || (wt==='phone' && !newPin && !(emp&&emp.pin))){ toast('נא למלא את כל השדות (כולל קוד אישי)'); return; }
     if(wt==='phone'){
@@ -1162,6 +1254,8 @@ function renderEmployeeDetail(empId){
   const life = employeeLifetimeStats(empId);
   const lastWeek = statsForRange(empId, periodStartAtOffset(1), periodStartAtOffset(0));
   const debtNotIncludingCurrent = debtNotIncludingCurrentWeek(empId);
+  if(state.flexMonthOffset === undefined) state.flexMonthOffset = 0;
+  const isFlex = emp.payCycle === 'flexible';
 
   root.innerHTML = `
     <div class="row between no-print" style="margin-bottom:6px;">
@@ -1201,6 +1295,8 @@ function renderEmployeeDetail(empId){
       </div>
     </div>
 
+    ${isFlex ? `<div class="card" id="flex-month-card">${flexMonthHtml(empId, state.flexMonthOffset, true)}</div>` : ''}
+
     <div class="card">
       <h3>ציר זמן — הכל, לפי תאריך</h3>
       <p class="muted" style="font-size:12px;">כניסות, יציאות, תשלומים, טיפים והערות — מהחדש לישן</p>
@@ -1217,7 +1313,12 @@ function renderEmployeeDetail(empId){
     </div>
   `;
 
-  document.getElementById('back-link').onclick = (e)=>{ e.preventDefault(); state.detailEmployeeId=null; renderApp(); };
+  document.getElementById('back-link').onclick = (e)=>{ e.preventDefault(); state.detailEmployeeId=null; state.flexMonthOffset=0; renderApp(); };
+  root.querySelectorAll('[data-flexm]').forEach(b=>b.onclick=()=>{
+    if(b.dataset.flexm==='prev') state.flexMonthOffset++;
+    else if(state.flexMonthOffset>0) state.flexMonthOffset--;
+    renderEmployeeDetail(empId);
+  });
   document.getElementById('btn-edit-emp').onclick = ()=>openEmployeeForm(emp.id);
   document.getElementById('btn-reset-dev').onclick = guard(async ()=>{
     if(!confirm('לאפס את שיוך המכשיר של העובד?')) return;
