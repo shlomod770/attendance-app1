@@ -548,13 +548,14 @@ function orderedTabs(){
 }
 function renderApp(){
   const pendingCount = state.employees.filter(e=>e.pendingApproval).length;
+  const exceptionsCount = state.shifts.filter(s=>shiftExceptionReasons(s).length).length; // same count as the dashboard
   tabsEl.innerHTML = orderedTabs().map(([id,label])=>
-    `<button class="tab ${state.tab===id?'active':''}" data-tab="${id}">${label}${id==='newEmployees'&&pendingCount?` (${pendingCount})`:''}</button>`
+    `<button class="tab ${state.tab===id?'active':''}" data-tab="${id}">${label}${id==='newEmployees'&&pendingCount?` (${pendingCount})`:''}${id==='exceptions'&&exceptionsCount?` (${exceptionsCount})`:''}</button>`
   ).join('');
   tabsEl.querySelectorAll('.tab').forEach(btn=>{
     btn.onclick = ()=>{
       const target = btn.dataset.tab;
-      state.tab = target; state.detailEmployeeId=null; renderApp();
+      state.paymentFormReturn = null; state.tab = target; state.detailEmployeeId=null; renderApp();
       // Quiet background refresh — updates the data without any visible reload,
       // so switching tabs also catches anything that changed a moment ago.
       loadAll().then(()=>{ if(state.tab === target) renderApp(); }).catch(()=>{});
@@ -665,11 +666,16 @@ function renderPayroll(){
     // visibly reduce what they're owed now, not just vanish.
     const carryover = statsUpTo(e.id, weekStart).remaining;
     const totalToPayNow = carryover + netThisWeek;
-    return { emp:e, ...st, remaining: Math.max(0,netThisWeek), netThisWeek, carryover, totalToPayNow };
+    // Advances ("מקדמה") are tagged to a week via periodKey. Given-for-next-week = tagged to the week after this one.
+    const nextKey = periodKeyOf(addDays(weekStart,7)), thisKey = periodKeyOf(weekStart);
+    const advs = state.payments.filter(p=>p.employeeId===e.id && p.note==='מקדמה' && !p.isTip);
+    const advNext = advs.filter(p=>p.periodKey===nextKey).reduce((sum,p)=>sum+(p.amount||0),0); // given now, counts against NEXT week
+    const advIn = advs.filter(p=>p.periodKey===thisKey).reduce((sum,p)=>sum+(p.amount||0),0);   // given earlier, already counted in THIS week
+    return { emp:e, ...st, remaining: Math.max(0,netThisWeek), netThisWeek, carryover, totalToPayNow, advNext, advIn };
   });
   // Only show people who actually have something going on — either this week's
   // work/payment, or a carried-over balance (owed or credited) from before.
-  const rows = allRows.filter(r => Math.abs(r.netThisWeek) > 0.005 || Math.abs(r.carryover) > 0.005);
+  const rows = allRows.filter(r => Math.abs(r.netThisWeek) > 0.005 || Math.abs(r.carryover) > 0.005 || r.advNext > 0.005);
   const todayStrP = toInputDate(new Date());
   const payDateStr = state.payrollPayDate || todayStrP;
   const totalThisWeek = rows.reduce((s,r)=>s+Math.max(0,r.netThisWeek),0);
@@ -735,6 +741,8 @@ function renderPayroll(){
           ? `   ⚠️ חוב ישן: ${money(r.carryover)}`
           : `   ✅ מקדמה ביתר (זכות): ${money(Math.abs(r.carryover))}`);
       }
+      if(r.advIn > 0.005) lines.push(`   ⏩ כולל מקדמה מהשבוע הקודם: ${money(r.advIn)}`);
+      if(r.advNext > 0.005) lines.push(`   ⏩ ניתנה מקדמה: ${money(r.advNext)} (תורד מהשבוע הבא)`);
       lines.push(`   💶 לתשלום עכשיו: ${money(Math.max(0,r.totalToPayNow))}`);
       lines.push('');
     });
@@ -791,34 +799,43 @@ function renderPayroll(){
         carryoverBadge = ` <span class="tag" style="background:#E4F1E9;color:#3e7c59;">✅ זכות ${money(Math.abs(r.carryover))}</span>`;
       }
     }
+    const advBadge = (r.advNext > 0.005 ? ` <span class="tag" style="background:#FFF1D6;color:#8a5a00;">⏩ מקדמה ${money(r.advNext)} ניתנה — תורד מהשבוע הבא</span>` : '')
+                   + (r.advIn > 0.005 ? ` <span class="tag" style="background:#FFF1D6;color:#8a5a00;">⏩ כולל מקדמה ${money(r.advIn)} מהשבוע הקודם</span>` : '');
     return `
     <div class="card" style="padding:12px 14px;">
       <div class="row between">
         <div>
           <b style="font-size:14px;">${displayName(r.emp)}</b>
           <span class="muted" style="font-size:12px;">· ${fmtHours(r.hours)} ש'</span>
-          ${carryoverBadge}
+          ${carryoverBadge}${advBadge}
         </div>
         <b class="mono" style="font-size:15px;">${money(Math.max(0,r.totalToPayNow))}</b>
       </div>
       <div class="row" style="margin-top:8px;gap:6px;align-items:center;">
-        <input data-amt="${r.emp.id}" type="number" step="0.01" value="${r.remaining>0?r.remaining.toFixed(2):0}" style="width:90px;text-align:left;padding:8px;font-size:13px;">
+        <input data-amt="${r.emp.id}" type="number" step="0.01" value="${r.totalToPayNow>0.005?r.totalToPayNow.toFixed(2):0}" style="width:90px;text-align:left;padding:8px;font-size:13px;">
         <button class="btn btn-primary btn-sm" data-pay="${r.emp.id}" style="flex:1;">שלם</button>
         <button class="btn btn-ghost btn-sm" data-toggle-more="${r.emp.id}" style="padding:8px 10px;">⋯</button>
       </div>
       <div id="more-${r.emp.id}" class="hidden" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line);">
         <div class="row between muted" style="font-size:12px;"><span>הגיע השבוע (${money(r.emp.hourlyRate)}/שעה)</span><span class="mono">${money(r.earned)}</span></div>
         <div class="row between muted" style="font-size:12px;"><span>כבר שולם השבוע</span><span class="mono">${money(r.paid)}</span></div>
+        <div class="row between" style="margin-top:6px;background:var(--paper-2);padding:6px 8px;border-radius:8px;">
+          <label style="margin:0;font-size:12px;">💵 נתתי בפועל ביד (סה"כ)</label>
+          <input data-given="${r.emp.id}" type="number" step="0.01" placeholder="420" style="width:90px;text-align:left;padding:6px;font-size:13px;">
+        </div>
+        <p class="muted" style="font-size:11px;margin:4px 0 0;">הזינו כמה נתתם בפועל — מה שמעל הסכום שלמעלה יחולק לטיפ ולמקדמה.</p>
         <div class="row between" style="margin-top:6px;">
-          <label style="margin:0;font-size:12px;">+ טיפ (לא נכנס לחוב)</label>
+          <label style="margin:0;font-size:12px;">🎁 טיפ (לא נכנס לחוב)</label>
           <input data-tip="${r.emp.id}" type="number" step="0.01" value="0" style="width:90px;text-align:left;padding:6px;font-size:13px;">
         </div>
-        <div class="row between" style="margin-top:6px;background:var(--paper-2);padding:6px 8px;border-radius:8px;">
-          <label style="margin:0;font-size:12px;">💵 נתת בפועל ביד?</label>
-          <input data-given="${r.emp.id}" type="number" step="0.01" placeholder="140" style="width:90px;text-align:left;padding:6px;font-size:13px;">
+        <div class="row between" style="margin-top:6px;">
+          <label style="margin:0;font-size:12px;">⏩ מקדמה (נרשמת על השבוע הבא)</label>
+          <input data-adv="${r.emp.id}" type="number" step="0.01" value="0" style="width:90px;text-align:left;padding:6px;font-size:13px;">
         </div>
+        <div data-sum="${r.emp.id}" style="margin-top:6px;font-size:12px;font-weight:600;"></div>
         <div class="row" style="margin-top:6px;flex-wrap:wrap;">
-          <button class="btn btn-ghost btn-sm" data-autotip="${r.emp.id}">↳ חשב הפרש כטיפ</button>
+          <button class="btn btn-ghost btn-sm" data-autotip="${r.emp.id}">↳ כל העודף = טיפ</button>
+          <button class="btn btn-ghost btn-sm" data-autoadv="${r.emp.id}">↳ כל העודף = מקדמה</button>
           <button class="btn btn-ghost btn-sm" data-fill-cumulative="${r.emp.id}">מלא לפי הסכום הכולל</button>
           <button class="btn btn-ghost btn-sm" data-open="${r.emp.id}">פתח כרטיס עובד</button>
         </div>
@@ -831,7 +848,7 @@ function renderPayroll(){
     document.getElementById('more-'+b.dataset.toggleMore).classList.toggle('hidden');
   });
 
-  async function payOne(empId, amt, tip){
+  async function payOne(empId, amt, tip, adv){
     // Real payment date: the picker's value (default today). Noon avoids timezone edge cases.
     const pickedStr = (document.getElementById('pay-date') || {}).value;
     const payDate = pickedStr ? new Date(pickedStr+'T12:00:00') : new Date();
@@ -842,6 +859,14 @@ function renderPayroll(){
         periodKey: periodKeyOf(weekStart)
       });
     }
+    if(adv > 0){
+      await db.collection('payments').add({
+        employeeId: empId, amount: adv,
+        date: firebase.firestore.Timestamp.fromDate(payDate),
+        periodKey: periodKeyOf(addDays(weekStart, 7)), // advance = money for the NEXT week, so this week stays balanced
+        note: 'מקדמה'
+      });
+    }
     if(tip > 0){
       await db.collection('payments').add({
         employeeId: empId, amount: tip, isTip: true,
@@ -850,34 +875,57 @@ function renderPayroll(){
     }
   }
 
+  // Live split: when "given in hand" is filled, the part above (amount + tip) is the advance.
+  function recalcSplit(empId){
+    const q = k=>cont.querySelector(`[data-${k}="${empId}"]`);
+    const amt = parseFloat(q('amt').value) || 0;
+    const tip = parseFloat(q('tip').value) || 0;
+    const givenRaw = q('given').value;
+    const sumEl = q('sum');
+    let warn = '';
+    if(givenRaw !== ''){
+      const given = parseFloat(givenRaw) || 0;
+      const adv = Math.round((given - amt - tip) * 100) / 100;
+      q('adv').value = adv > 0 ? adv.toFixed(2) : 0;
+      if(adv < 0) warn = ` ⚠️ נתתם פחות ב-${Math.abs(adv).toFixed(2)} € מהסכום+טיפ`;
+    }
+    const adv = parseFloat(q('adv').value) || 0;
+    const total = Math.round((amt + tip + adv) * 100) / 100;
+    sumEl.textContent = `סה"כ ביד: ${total.toFixed(2)} € = שבוע ${amt.toFixed(2)} + טיפ ${tip.toFixed(2)} + מקדמה ${adv.toFixed(2)}${warn}`;
+    sumEl.style.color = warn ? 'var(--danger, #b3402a)' : '';
+  }
+  rows.forEach(r=>{
+    ['amt','tip','given','adv'].forEach(k=>{
+      const el = cont.querySelector(`[data-${k}="${r.emp.id}"]`);
+      if(el) el.addEventListener('input', ()=>recalcSplit(r.emp.id));
+    });
+    recalcSplit(r.emp.id);
+  });
+
   cont.querySelectorAll('[data-fill-cumulative]').forEach(b=>b.onclick=()=>{
     const r = rows.find(x=>x.emp.id===b.dataset.fillCumulative);
     const v = Math.max(0, r.totalToPayNow);
     document.querySelector(`[data-amt="${r.emp.id}"]`).value = v>0?v.toFixed(2):0;
   });
-  cont.querySelectorAll('[data-autotip]').forEach(b=>b.onclick=()=>{
-    const empId = b.dataset.autotip;
-    const given = parseFloat(document.querySelector(`[data-given="${empId}"]`).value);
-    const amtInput = document.querySelector(`[data-amt="${empId}"]`);
-    const tipInput = document.querySelector(`[data-tip="${empId}"]`);
-    if(isNaN(given)){ toast('נא להזין כמה נתת בפועל'); return; }
-    const owed = parseFloat(amtInput.value) || 0;
-    // Round to the cent to avoid ugly floating-point remainders like 15.999999999998
-    const diff = Math.round((given - owed) * 100) / 100;
-    if(diff <= 0){
-      tipInput.value = 0;
-      toast('הסכום שנתת לא גבוה מהסכום לתשלום — אין טיפ לחשב');
-      return;
-    }
-    tipInput.value = diff.toFixed(2);
-    toast(`חושב: ${diff.toFixed(2)} € יירשמו כטיפ`);
-  });
+  function splitExtra(empId, toTip){
+    const q = k=>cont.querySelector(`[data-${k}="${empId}"]`);
+    const given = parseFloat(q('given').value);
+    if(isNaN(given)){ toast('נא להזין כמה נתתם בפועל'); return; }
+    const amt = parseFloat(q('amt').value) || 0;
+    const diff = Math.round((given - amt) * 100) / 100;
+    if(diff <= 0){ q('tip').value = 0; recalcSplit(empId); toast('לא נתתם יותר מהסכום — אין עודף לחלק'); return; }
+    q('tip').value = toTip ? diff.toFixed(2) : 0;
+    recalcSplit(empId); // the rest automatically becomes the advance
+  }
+  cont.querySelectorAll('[data-autotip]').forEach(b=>b.onclick=()=>splitExtra(b.dataset.autotip, true));
+  cont.querySelectorAll('[data-autoadv]').forEach(b=>b.onclick=()=>splitExtra(b.dataset.autoadv, false));
   cont.querySelectorAll('[data-pay]').forEach(b=>b.onclick=guard(async()=>{
     const empId = b.dataset.pay;
     const amt = parseFloat(document.querySelector(`[data-amt="${empId}"]`).value) || 0;
     const tip = parseFloat(document.querySelector(`[data-tip="${empId}"]`).value) || 0;
-    if(amt<=0 && tip<=0){ toast('נא להזין סכום'); return; }
-    await payOne(empId, amt, tip);
+    const adv = parseFloat(document.querySelector(`[data-adv="${empId}"]`).value) || 0;
+    if(amt<=0 && tip<=0 && adv<=0){ toast('נא להזין סכום'); return; }
+    await payOne(empId, amt, tip, adv);
     await loadAll(); renderPayroll(); toast('התשלום נשמר');
   }));
   cont.querySelectorAll('[data-open]').forEach(b=>b.onclick=()=>{
@@ -888,14 +936,16 @@ function renderPayroll(){
     const toPay = rows.filter(r=>{
       const amt = parseFloat(document.querySelector(`[data-amt="${r.emp.id}"]`).value) || 0;
       const tip = parseFloat(document.querySelector(`[data-tip="${r.emp.id}"]`).value) || 0;
-      return amt > 0 || tip > 0;
+      const adv = parseFloat(document.querySelector(`[data-adv="${r.emp.id}"]`).value) || 0;
+      return amt > 0 || tip > 0 || adv > 0;
     });
     if(!toPay.length){ toast('אין למי לשלם'); return; }
     if(!confirm(`לשלם ל-${toPay.length} עובדים לפי הסכומים שמופיעים למטה?`)) return;
     for(const r of toPay){
       const amt = parseFloat(document.querySelector(`[data-amt="${r.emp.id}"]`).value) || 0;
       const tip = parseFloat(document.querySelector(`[data-tip="${r.emp.id}"]`).value) || 0;
-      await payOne(r.emp.id, amt, tip);
+      const adv = parseFloat(document.querySelector(`[data-adv="${r.emp.id}"]`).value) || 0;
+      await payOne(r.emp.id, amt, tip, adv);
     }
     await loadAll(); renderPayroll(); toast('כל התשלומים נשמרו');
   });
@@ -2102,6 +2152,11 @@ function openPaymentForm(empId, paymentId, isNav){
   const weekStart = periodStartAtOffset(state.periodOffset);
 
   const existingType = existing ? (existing.isTip ? 'tip' : existing.isAdjustment ? 'adjustment' : 'normal') : 'normal';
+  const backAfter = ()=>{
+    if(paymentId && state.paymentFormReturn === paymentId){
+      state.paymentFormReturn = null; state.tab = 'payments'; state.detailEmployeeId = null; renderApp();
+    } else renderEmployeeDetail(empId);
+  };
 
   root.innerHTML = `
     <div class="card">
@@ -2172,10 +2227,10 @@ function openPaymentForm(empId, paymentId, isNav){
     document.getElementById('btn-del').onclick = guard(async ()=>{
       if(!confirm('למחוק תשלום זה?')) return;
       await db.collection('payments').doc(existing.id).delete();
-      await loadAll(); renderEmployeeDetail(empId);
+      await loadAll(); backAfter();
     });
   }
-  document.getElementById('btn-cancel').onclick = ()=>renderEmployeeDetail(empId);
+  document.getElementById('btn-cancel').onclick = backAfter;
   document.getElementById('btn-save').onclick = guard(async ()=>{
     const amount = parseFloat(document.getElementById('f-amount').value);
     const dateStr = document.getElementById('f-date').value;
@@ -2205,7 +2260,7 @@ function openPaymentForm(empId, paymentId, isNav){
       if(!note) delete payload.note;
       await db.collection('payments').add(payload);
     }
-    await loadAll(); renderEmployeeDetail(empId);
+    await loadAll(); backAfter();
     toast(type==='tip' ? 'הטיפ נשמר' : type==='adjustment' ? 'החוב נסגר' : 'נשמר');
   });
 }
@@ -2420,6 +2475,8 @@ function paymentPeriodLabel(p){
   if(p.isAdjustment) return 'סגירת חוב';
   if(!p.periodKey) return '—';
   const s = new Date(p.periodKey + 'T00:00:00');
+  const pe = state.employees.find(e=>e.id===p.employeeId);
+  if(pe && pe.payCycle==='flexible') return `עבור חודש: ${s.toLocaleDateString('he-IL',{month:'long',year:'numeric'})}`;
   return `עבור שבוע: ${fmtDateHe(s)} – ${fmtDateHe(addDays(s,6))}`;
 }
 function renderPayments(){
@@ -2471,11 +2528,22 @@ function renderPayments(){
             <div>${emp?displayName(emp):'(עובד לא ידוע)'} ${p.isTip?'<span class="tag tag-open">טיפ</span>':''}${p.isAdjustment?'<span class="tag tag-off">סגירת חוב</span>':''}</div>
             <div class="muted" style="font-size:12px;">${paymentPeriodLabel(p)}${p.note?' · '+p.note:''}</div>
           </div>
-          <b class="mono">${money(p.amount)}</b>
+          <div class="row" style="gap:10px;align-items:center;">
+            <b class="mono">${money(p.amount)}</b>
+            <button class="btn btn-ghost btn-sm" data-edit-payment="${p.id}" data-emp="${p.employeeId}" style="padding:6px 10px;white-space:nowrap;">✏️ עריכה</button>
+          </div>
         </div>`;
       }).join('')}
     </div>`;
   }).join('');
+
+  // Only the explicit button opens the editor (so scrolling can't trigger it by accident).
+  // The payment form returns here afterwards (see state.paymentFormReturn).
+  cont.querySelectorAll('[data-edit-payment]').forEach(b=>b.onclick=()=>{
+    state.tab = 'employees'; state.detailEmployeeId = b.dataset.emp; // keeps the 20s auto-refresh from wiping the form
+    state.paymentFormReturn = b.dataset.editPayment;
+    openPaymentForm(b.dataset.emp, b.dataset.editPayment);
+  });
 }
 function renderReports(){
   const typeFilter = state.reportTypeFilter || 'all';
