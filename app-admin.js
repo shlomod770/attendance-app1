@@ -670,6 +670,8 @@ function renderPayroll(){
   // Only show people who actually have something going on — either this week's
   // work/payment, or a carried-over balance (owed or credited) from before.
   const rows = allRows.filter(r => Math.abs(r.netThisWeek) > 0.005 || Math.abs(r.carryover) > 0.005);
+  const todayStrP = toInputDate(new Date());
+  const payDateStr = state.payrollPayDate || todayStrP;
   const totalThisWeek = rows.reduce((s,r)=>s+Math.max(0,r.netThisWeek),0);
   const totalCumulative = rows.reduce((s,r)=>s+Math.max(0,r.totalToPayNow),0);
 
@@ -689,6 +691,16 @@ function renderPayroll(){
     <div class="card">
       <div class="row between"><span class="muted">רק השבוע הזה (טרי)</span><b class="mono">${money(totalThisWeek)}</b></div>
       <div class="row between"><span class="muted">סה"כ לתשלום בפועל (כולל יתרות ישנות)</span><b class="mono">${money(totalCumulative)}</b></div>
+      <div style="margin-top:10px;padding:8px 10px;background:var(--paper-2);border-radius:10px;">
+        <div class="row between" style="align-items:center;gap:8px;">
+          <label style="margin:0;font-size:13px;"><b>📅 תאריך התשלום בפועל</b></label>
+          <input id="pay-date" type="date" value="${payDateStr}" style="width:150px;padding:6px;font-size:13px;">
+        </div>
+        <div class="row between" style="margin-top:4px;">
+          <span class="muted" style="font-size:11px;">חל על כל התשלומים והטיפים שתרשמו ממסך זה. השבוע שאליו התשלום שייך לא משתנה.</span>
+          <button class="btn btn-ghost btn-sm" id="pay-date-today" ${payDateStr===todayStrP?'style="display:none;"':''}>היום</button>
+        </div>
+      </div>
       <button class="btn btn-brass" id="btn-pay-all" style="margin-top:10px;">שלם לכולם לפי "סכום לתשלום" למטה</button>
     </div>
     <div id="payroll-rows"></div>
@@ -701,6 +713,11 @@ function renderPayroll(){
     <div id="flex-pay-rows"></div>
     ` : ''}
   `;
+  document.getElementById('pay-date').onchange = (ev)=>{
+    state.payrollPayDate = ev.target.value || undefined;
+    document.getElementById('pay-date-today').style.display = (ev.target.value && ev.target.value !== todayStrP) ? '' : 'none';
+  };
+  document.getElementById('pay-date-today').onclick = ()=>{ state.payrollPayDate = undefined; renderPayroll(); };
   document.getElementById('btn-prev').onclick = ()=>{ state.payrollOffset++; renderPayroll(); };
   document.getElementById('btn-next').onclick = ()=>{ if(state.payrollOffset>0){ state.payrollOffset--; renderPayroll(); } };
   document.getElementById('btn-copy-summary').onclick = ()=>{
@@ -815,17 +832,20 @@ function renderPayroll(){
   });
 
   async function payOne(empId, amt, tip){
+    // Real payment date: the picker's value (default today). Noon avoids timezone edge cases.
+    const pickedStr = (document.getElementById('pay-date') || {}).value;
+    const payDate = pickedStr ? new Date(pickedStr+'T12:00:00') : new Date();
     if(amt > 0){
       await db.collection('payments').add({
         employeeId: empId, amount: amt,
-        date: firebase.firestore.Timestamp.fromDate(new Date()),
+        date: firebase.firestore.Timestamp.fromDate(payDate),
         periodKey: periodKeyOf(weekStart)
       });
     }
     if(tip > 0){
       await db.collection('payments').add({
         employeeId: empId, amount: tip, isTip: true,
-        date: firebase.firestore.Timestamp.fromDate(new Date())
+        date: firebase.firestore.Timestamp.fromDate(payDate)
       });
     }
   }
