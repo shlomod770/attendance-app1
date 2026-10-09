@@ -529,6 +529,7 @@ const TABS = [
   ['dashboard','דשבורד'],
   ['newEmployees','עובדים חדשים'],
   ['payroll','סגירת שבוע'],
+  ['flexClose','סגירת חודש גמיש'],
   ['log','כניסות ויציאות'],
   ['exceptions','חריגים'],
   ['employees','עובדים'],
@@ -562,6 +563,7 @@ function renderApp(){
   if(state.tab==='dashboard') renderDashboard();
   else if(state.tab==='newEmployees') renderNewEmployees();
   else if(state.tab==='payroll') renderPayroll();
+  else if(state.tab==='flexClose') renderFlexClose();
   else if(state.tab==='log') renderLog();
   else if(state.tab==='employees'){
     if(state.detailEmployeeId) renderEmployeeDetail(state.detailEmployeeId);
@@ -694,6 +696,7 @@ function renderPayroll(){
     <div class="card" style="margin-top:20px;">
       <h2 style="font-size:16px;">עובדים בתשלום גמיש (לא שבועי)</h2>
       <p class="muted" style="font-size:12px;">עובדים אלה לא נספרים לפי שבוע — התשלום להם נקבע ידנית מתי שנוח (דו-שבועי, חודשי וכו'). היתרה שלהם היא תמיד "סך הכל" ולא קשורה לשבוע ספציפי.</p>
+      <button class="btn btn-brass btn-sm" id="goto-flexclose">📆 מעבר ל"סגירת חודש גמיש"</button>
     </div>
     <div id="flex-pay-rows"></div>
     ` : ''}
@@ -735,13 +738,13 @@ function renderPayroll(){
   };
 
   if(flexibleEmployees.length){
+    document.getElementById('goto-flexclose').onclick = ()=>{ state.tab='flexClose'; renderApp(); };
     const flexCont = document.getElementById('flex-pay-rows');
     flexCont.innerHTML = flexibleEmployees.map(e=>{
       const life = employeeLifetimeStats(e.id);
       return `<div class="card">
         <div class="row between"><b>${displayName(e)}</b><span class="mono">${fmtHours(life.hours)} ש' סה"כ</span></div>
         <div class="row between"><b>סה"כ נותר לשלם</b><b class="mono">${money(life.remaining)}</b></div>
-        <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line);">${flexMonthHtml(e.id, 0, false)}</div>
         <div class="row" style="margin-top:10px;">
           <button class="btn btn-primary btn-sm" data-flex-pay="${e.id}">רישום תשלום</button>
           <button class="btn btn-ghost btn-sm" data-flex-open="${e.id}">פתח כרטיס עובד</button>
@@ -876,6 +879,126 @@ function renderPayroll(){
     }
     await loadAll(); renderPayroll(); toast('כל התשלומים נשמרו');
   });
+}
+
+// ---------- flexible monthly closing (סגירת חודש גמיש) ----------
+// Same idea as the weekly closing, but by calendar month and only for employees on
+// "flexible" pay. A payment is tagged to a month via periodKey = first day of that month
+// (so paying on the 2nd of October "for September" is possible). Payments with no
+// periodKey (older ones) count in the month of their real date.
+function renderFlexClose(){
+  if(state.flexCloseOffset === undefined) state.flexCloseOffset = 0;
+  const offset = state.flexCloseOffset;
+  const mStart = addMonths(startOfMonth(new Date()), -offset);
+  const mEnd = addMonths(mStart, 1);
+  const prevStart = addMonths(mStart, -1);
+  const label = mStart.toLocaleDateString('he-IL',{month:'long',year:'numeric'});
+  const prevLabel = prevStart.toLocaleDateString('he-IL',{month:'long'});
+  const emps = sortByCustomOrder(state.employees.filter(e=>e.active!==false && e.payCycle==='flexible'));
+
+  const rows = emps.map(e=>{
+    const m = flexMonthStats(e.id, offset);
+    const prev = statsForRange(e.id, prevStart, mStart);
+    const pays = state.payments
+      .filter(p=>p.employeeId===e.id && !p.isTip)
+      .filter(p=>{ const d = paymentEffectiveDate(p); return d && d >= mStart && d < mEnd; })
+      .sort((a,b)=>{
+        const da = a.date && a.date.toDate ? a.date.toDate() : new Date(a.date);
+        const db_ = b.date && b.date.toDate ? b.date.toDate() : new Date(b.date);
+        return da - db_;
+      });
+    return { emp:e, m, prev, pays };
+  });
+  const totalRemaining = rows.reduce((s,r)=>s+Math.max(0,r.m.remaining),0);
+  const totalHours = rows.reduce((s,r)=>s+r.m.hours,0);
+  const todayStr = toInputDate(new Date());
+
+  root.innerHTML = `
+    <div class="card">
+      <h2>סגירת חודש גמיש</h2>
+      <div class="nav-period">
+        <button id="btn-fprev">›</button>
+        <div class="period-label">
+          <b>${label}</b><br>
+          <span class="muted">${offset===0?'החודש הנוכחי (בעיצומו)':offset===1?'החודש שהסתיים':offset+' חודשים אחורה'}</span>
+        </div>
+        <button id="btn-fnext" ${offset===0?'disabled style="opacity:.3"':''}>‹</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="row between"><span class="muted">סה"כ שעות (כל העובדים הגמישים)</span><b class="mono">${fmtHours(totalHours)}</b></div>
+      <div class="row between"><span class="muted">סה"כ נותר לשלם</span><b class="mono">${money(totalRemaining)}</b></div>
+    </div>
+    ${rows.length ? '' : '<div class="card"><p class="muted">אין עובדים בתשלום גמיש. כדי להוסיף: עובדים ← עריכת פרטים ← תדירות תשלום "גמיש".</p></div>'}
+    ${rows.map(r=>{
+      const e = r.emp, m = r.m;
+      const plan = getMonthlyPlan(e);
+      const open = hasOpenShift(e.id);
+      return `
+      <div class="card">
+        <div class="row between">
+          <div><b>${displayName(e)}</b> <span class="muted" style="font-size:12px;">· ${money(e.hourlyRate)}/שעה</span>${open?' <span class="tag tag-open">משמרת פתוחה</span>':''}</div>
+        </div>
+        <div class="row between" style="margin-top:8px;"><span>שעות ב${label}</span><b class="mono" style="font-size:18px;">${fmtHours(m.hours)}</b></div>
+        <div class="row between"><span>מגיע לו על החודש</span><b class="mono">${money(m.earned)}</b></div>
+        <div class="row between"><span>שולם על החודש</span><b class="mono">${money(m.paid)}</b></div>
+        ${Math.abs(m.adjust)>0.005?`<div class="row between"><span>חוב שנסגר</span><b class="mono">${money(m.adjust)}</b></div>`:''}
+        ${Math.abs(m.carryover)>0.005?`<div class="row between muted"><span>${m.carryover>0?'חוב מחודשים קודמים':'זכות מחודשים קודמים'}</span><span class="mono">${money(Math.abs(m.carryover))}</span></div>`:''}
+        <div class="row between" style="margin-top:6px;padding-top:6px;border-top:1px solid var(--line);"><b>נותר לשלם</b><b class="mono" style="font-size:18px;">${money(m.remaining)}</b></div>
+        <p class="muted" style="font-size:12px;margin-top:6px;">${prevLabel}: ${fmtHours(r.prev.hours)} שעות · הגיע ${money(r.prev.earned)} · שולם ${money(r.prev.paid)}</p>
+        ${plan?`<p class="muted" style="font-size:12px;">הסדר קבוע: ${plan.a1>0?`ב-${plan.d1} לחודש ${money(plan.a1)}`:''}${plan.a1>0&&plan.a2>0?' · ':''}${plan.a2>0?`ב-${plan.d2} לחודש ${money(plan.a2)}`:''} · והשאר בסוף החודש לפי שעות</p>`:''}
+        ${r.pays.length?`<div style="margin-top:8px;"><b style="font-size:13px;">תשלומים על ${label}</b>
+          ${r.pays.map(p=>{
+            const d = p.date && p.date.toDate ? p.date.toDate() : new Date(p.date);
+            return `<div class="row between" style="font-size:13px;margin-top:4px;"><span>${fmtDateHe(d)}${p.isAdjustment?' (סגירת חוב)':''}${p.note?' · '+p.note:''}</span><span><b class="mono">${money(p.amount)}</b> <a href="#" data-edit-pay="${p.id}" data-emp="${e.id}" style="font-size:12px;">עריכה</a></span></div>`;
+          }).join('')}</div>`:''}
+        <div style="margin-top:10px;padding:10px;background:var(--paper-2);border-radius:10px;">
+          <b style="font-size:13px;">רישום תשלום עבור ${label}</b>
+          <div class="row" style="gap:6px;margin-top:6px;align-items:center;">
+            <input data-famt="${e.id}" type="number" step="0.01" placeholder="סכום €" style="width:90px;text-align:left;padding:8px;font-size:13px;">
+            <input data-fdate="${e.id}" type="date" value="${todayStr}" style="flex:1;padding:8px;font-size:13px;">
+          </div>
+          <input data-fnote="${e.id}" placeholder="הערה (אופציונלי)" style="margin-top:6px;padding:8px;font-size:13px;">
+          <div class="row" style="margin-top:6px;flex-wrap:wrap;">
+            <button class="btn btn-primary btn-sm" data-fpay="${e.id}" style="flex:1;">שלם</button>
+            <button class="btn btn-ghost btn-sm" data-ffill="${e.id}">מלא את היתרה</button>
+            <button class="btn btn-ghost btn-sm" data-fopen="${e.id}">כרטיס עובד</button>
+          </div>
+          <p class="muted" style="font-size:11px;margin-top:4px;">התאריך הוא מתי שילמת בפועל. החודש נקבע לפי החודש שמוצג למעלה — כדי לשלם על חודש קודם, עברו אליו עם החץ.</p>
+        </div>
+      </div>`;
+    }).join('')}
+  `;
+
+  document.getElementById('btn-fprev').onclick = ()=>{ state.flexCloseOffset++; renderFlexClose(); };
+  document.getElementById('btn-fnext').onclick = ()=>{ if(state.flexCloseOffset>0){ state.flexCloseOffset--; renderFlexClose(); } };
+  root.querySelectorAll('[data-ffill]').forEach(b=>b.onclick=()=>{
+    const r = rows.find(x=>x.emp.id===b.dataset.ffill);
+    root.querySelector(`[data-famt="${r.emp.id}"]`).value = r.m.remaining>0 ? r.m.remaining.toFixed(2) : '';
+  });
+  root.querySelectorAll('[data-fopen]').forEach(b=>b.onclick=()=>{
+    state.tab='employees'; state.detailEmployeeId = b.dataset.fopen; renderApp();
+  });
+  root.querySelectorAll('[data-edit-pay]').forEach(a=>a.onclick=(ev)=>{
+    ev.preventDefault();
+    state.tab='employees'; state.detailEmployeeId = a.dataset.emp;
+    openPaymentForm(a.dataset.emp, a.dataset.editPay);
+  });
+  root.querySelectorAll('[data-fpay]').forEach(b=>b.onclick=guard(async()=>{
+    const id = b.dataset.fpay;
+    const amt = parseFloat(root.querySelector(`[data-famt="${id}"]`).value) || 0;
+    const dateStr = root.querySelector(`[data-fdate="${id}"]`).value;
+    const note = root.querySelector(`[data-fnote="${id}"]`).value.trim();
+    if(amt<=0 || !dateStr){ toast('נא למלא סכום ותאריך'); return; }
+    const payload = {
+      employeeId: id, amount: amt,
+      date: firebase.firestore.Timestamp.fromDate(new Date(dateStr+'T12:00:00')),
+      periodKey: dateKey(mStart) // first day of the displayed month = "this payment is for that month"
+    };
+    if(note) payload.note = note;
+    await db.collection('payments').add(payload);
+    await loadAll(); renderFlexClose(); toast('התשלום נשמר');
+  }));
 }
 
 // ---------- employees list ----------
@@ -1952,6 +2075,18 @@ function openPaymentForm(empId, paymentId, isNav){
           <button id="btn-next-w" ${state.periodOffset===0?'disabled style="opacity:.3"':''}>‹</button>
         </div>
       </div>
+      <div id="month-section">
+        <label>עבור איזה חודש התשלום הזה</label>
+        <select id="f-month">${(()=>{
+          const cur = startOfMonth(new Date());
+          let sel = dateKey(cur);
+          if(existing){ sel = existing.periodKey ? existing.periodKey.slice(0,8)+'01' : dateKey(startOfMonth(existDate)); }
+          const keys = [];
+          for(let i=0;i<18;i++) keys.push(dateKey(addMonths(cur,-i)));
+          if(!keys.includes(sel)) keys.push(sel);
+          return keys.map(k=>`<option value="${k}" ${k===sel?'selected':''}>${new Date(k+'T00:00:00').toLocaleDateString('he-IL',{month:'long',year:'numeric'})}</option>`).join('');
+        })()}</select>
+      </div>
       ${!existing?`<div class="row" style="margin-top:10px;">
         <button class="btn btn-ghost btn-sm" id="btn-full">סמן כשולם במלואו</button>
       </div>`:''}
@@ -1965,7 +2100,11 @@ function openPaymentForm(empId, paymentId, isNav){
   const isFlexible = emp.payCycle === 'flexible';
   const typeSel = document.getElementById('f-type');
   const weekSection = document.getElementById('week-section');
-  const syncTypeUi = ()=>{ weekSection.style.display = (typeSel.value==='normal' && !isFlexible) ? '' : 'none'; };
+  const monthSection = document.getElementById('month-section');
+  const syncTypeUi = ()=>{
+    weekSection.style.display = (typeSel.value==='normal' && !isFlexible) ? '' : 'none';
+    monthSection.style.display = (typeSel.value==='normal' && isFlexible) ? '' : 'none';
+  };
   typeSel.onchange = syncTypeUi;
   syncTypeUi();
   document.getElementById('btn-prev-w').onclick = ()=>{ state.periodOffset++; openPaymentForm(empId, paymentId, true); };
@@ -1999,13 +2138,15 @@ function openPaymentForm(empId, paymentId, isNav){
     };
     if(type==='normal' && !isFlexible){
       payload.periodKey = periodKeyOf(targetWeek);
+    } else if(type==='normal' && isFlexible){
+      payload.periodKey = document.getElementById('f-month').value; // first day of the chosen month
     } else {
       payload.periodKey = firebase.firestore.FieldValue.delete();
     }
     if(existing){
       await db.collection('payments').doc(existing.id).update(payload);
     } else {
-      if(type!=='normal' || isFlexible) delete payload.periodKey; // brand new doc — nothing to delete, just omit
+      if(type!=='normal') delete payload.periodKey; // brand new doc — nothing to delete, just omit
       if(!note) delete payload.note;
       await db.collection('payments').add(payload);
     }
