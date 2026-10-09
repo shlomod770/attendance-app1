@@ -80,6 +80,44 @@ function sameDay(a,b){
 }
 
 let currentEmployee = null;
+let lastLocalScan = null;   // last successful scan on this device: {type:'in'|'out', time:Date}
+let scanBusy = false;       // blocks a second scan from running while one is still being processed
+
+// ---- Scan cooldown (anti double-scan) ----
+// After a check-in you can't check out for SCAN_COOLDOWN_MS, and vice versa.
+// Nothing is written to `shifts` while blocked. SAME constant/logic exists in
+// app-employee.js AND app-kiosk.js — change both together.
+const SCAN_COOLDOWN_MS = 2 * 60 * 1000;
+
+// Latest real check-in / check-out event among the given shift docs (manual entries ignored).
+function lastScanEvent(docs){
+  let best = null;
+  docs.forEach(d=>{
+    const s = d.data();
+    if(s.manualTotalHours != null) return;
+    const tIn  = s.checkIn  && s.checkIn.toDate  ? s.checkIn.toDate()  : null;
+    const tOut = s.checkOut && s.checkOut.toDate ? s.checkOut.toDate() : null;
+    if(tIn  && (!best || tIn  >  best.time)) best = { type:'in',  time:tIn  };
+    if(tOut && (!best || tOut >= best.time)) best = { type:'out', time:tOut };
+  });
+  return best;
+}
+
+// Returns {type,time,remainingMs} if the person is still inside the cooldown window, else null.
+// localLast = last successful scan done on THIS device (covers the moment before Firestore data refreshes).
+function cooldownBlock(docs, localLast, now){
+  let last = lastScanEvent(docs);
+  if(localLast && (!last || localLast.time > last.time)) last = localLast;
+  if(!last) return null;
+  const elapsed = now - last.time;
+  if(elapsed < 0 || elapsed >= SCAN_COOLDOWN_MS) return null;
+  return { type: last.type, time: last.time, remainingMs: SCAN_COOLDOWN_MS - elapsed };
+}
+
+function waitText(ms){
+  const m = Math.max(1, Math.ceil(ms / 60000));
+  return m === 1 ? '1 минута' : `${m} минути`;
+}
 
 async function init(){
   const savedId = localStorage.getItem(LS_SESSION);
@@ -257,6 +295,8 @@ async function onScanSuccess(decodedText){
 }
 
 async function processScan(){
+  if(scanBusy) return;
+  scanBusy = true;
   try{
     const now = new Date();
     const loc = await getLocation();
@@ -282,6 +322,9 @@ async function processScan(){
     const allSnap = await db.collection('shifts')
       .where('employeeId','==', currentEmployee.id)
       .get();
+
+    const block = cooldownBlock(allSnap.docs, lastLocalScan, now);
+    if(block){ showBlocked(block); return; }
 
     const openDocs = allSnap.docs
       .filter(d => !d.data().checkOut && d.data().checkIn && d.data().manualTotalHours == null)
@@ -329,6 +372,8 @@ async function processScan(){
     console.error(err);
     toast('Възникна грешка. Опитайте отново.');
     renderStageButton();
+  }finally{
+    scanBusy = false;
   }
 }
 
@@ -380,12 +425,36 @@ function showLongShiftChoice(openDoc, checkIn, now, loc){
 
 function showResult(isCheckIn, bodyHtml){
   const stage = document.getElementById('stage');
-  const title = isCheckIn ? 'Вашето влизане е регистрирано ✓' : 'Вашето излизане е регистрирано ✓';
+  const when = new Date();
+  lastLocalScan = { type: isCheckIn ? 'in' : 'out', time: when };   // feeds the cooldown
+  const title = isCheckIn ? `Влязохте в ${fmtTime(when)}` : `Излязохте в ${fmtTime(when)}`;
+  const hint  = isCheckIn ? 'Готово! Вече сте записани.' : 'Готово! Излизането е записано.';
   stage.innerHTML = `
-    <div class="card center">
-      <h2 style="font-size:24px;">${title}</h2>
+    <div class="card center" style="border:3px solid #1e7a3c;">
+      <div style="font-size:72px;line-height:1;">✅</div>
+      <h2 style="font-size:28px;color:#1e7a3c;margin:10px 0 4px;">${title}</h2>
+      <p style="font-size:18px;font-weight:700;margin:0 0 10px;">${hint}</p>
       <p class="mono" style="line-height:1.9;">${bodyHtml}</p>
+      <p class="muted" style="font-size:15px;">Не е нужно да сканирате отново.</p>
       <button class="btn btn-primary" id="btn-ok" style="margin-top:10px;">Готово</button>
+    </div>
+  `;
+  document.getElementById('btn-ok').onclick = renderStageButton;
+}
+
+// Shown when someone scans again too soon. Nothing is written to the database.
+function showBlocked(block){
+  const stage = document.getElementById('stage');
+  const wait = waitText(block.remainingMs);
+  const msg = block.type === 'in'
+    ? `Току-що влязохте в ${fmtTime(block.time)}.<br>Ако искате да излезете, изчакайте още ${wait}.`
+    : `Току-що излязохте в ${fmtTime(block.time)}.<br>Ако искате да влезете отново, изчакайте още ${wait}.`;
+  stage.innerHTML = `
+    <div class="card center" style="border:3px solid #c77d00;">
+      <div style="font-size:64px;line-height:1;">⏳</div>
+      <h2 style="font-size:22px;margin:10px 0;">Вече сте записани</h2>
+      <p style="font-size:18px;line-height:1.6;">${msg}</p>
+      <button class="btn btn-primary" id="btn-ok" style="margin-top:10px;">Разбрах</button>
     </div>
   `;
   document.getElementById('btn-ok').onclick = renderStageButton;
@@ -411,6 +480,9 @@ async function processFixedShiftScan(now, loc){
   const allSnap = await db.collection('shifts')
     .where('employeeId','==', currentEmployee.id)
     .get();
+  const block = cooldownBlock(allSnap.docs, lastLocalScan, now);
+  if(block){ showBlocked(block); return; }
+
   const openDocs = allSnap.docs
     .filter(d => d.data().isFixedShift && !d.data().checkOut)
     .sort((a,b) => b.data().checkIn.toMillis() - a.data().checkIn.toMillis());
