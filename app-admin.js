@@ -944,6 +944,7 @@ function renderFlexClose(){
         </div>
         <button id="btn-fnext" ${offset===0?'disabled style="opacity:.3"':''}>‹</button>
       </div>
+      <button class="btn btn-ghost btn-sm" id="btn-fcopy" style="margin-top:10px;">📋 העתקת סיכום (לוואטסאפ/מייל)</button>
     </div>
     <div class="card">
       <div class="row between"><span class="muted">סה"כ שעות (כל העובדים הגמישים)</span><b class="mono">${fmtHours(totalHours)}</b></div>
@@ -990,6 +991,40 @@ function renderFlexClose(){
     }).join('')}
   `;
 
+  document.getElementById('btn-fcopy').onclick = ()=>{
+    if(!rows.length){ toast('אין עובדים גמישים להעתקה'); return; }
+    const lines = [`📋 *סגירת חודש גמיש — ${label}*`, ''];
+    rows.forEach(r=>{
+      const m = r.m;
+      lines.push(`👤 ${displayName(r.emp)}`);
+      lines.push(`   שעות ב${label}: ${fmtHours(m.hours)}`);
+      lines.push(`   מגיע על החודש: ${money(m.earned)} (${money(r.emp.hourlyRate)}/שעה)`);
+      if(Math.abs(m.carryover) > 0.005){
+        lines.push(m.carryover>0
+          ? `   ⚠️ חוב מחודשים קודמים: ${money(m.carryover)}`
+          : `   ✅ זכות מחודשים קודמים: ${money(Math.abs(m.carryover))}`);
+      } else {
+        lines.push(`   ✅ אין חוב מחודשים קודמים`);
+      }
+      if(r.pays.length){
+        lines.push(`   תשלומים על החודש:`);
+        r.pays.forEach(p=>{
+          const d = p.date && p.date.toDate ? p.date.toDate() : new Date(p.date);
+          lines.push(`     • ${fmtDateHe(d)}: ${money(p.amount)}${p.isAdjustment?' (סגירת חוב)':''}${p.note?' — '+p.note:''}`);
+        });
+      } else {
+        lines.push(`   תשלומים על החודש: אין`);
+      }
+      lines.push(`   שולם סה"כ: ${money(m.paid + m.adjust)}`);
+      lines.push(`   💶 נותר לשלם: ${money(m.remaining)}`);
+      lines.push(`   ${prevLabel}: ${fmtHours(r.prev.hours)} שעות · הגיע ${money(r.prev.earned)} · שולם ${money(r.prev.paid)}`);
+      lines.push('');
+    });
+    lines.push('----------------------------');
+    lines.push(`סה"כ שעות: ${fmtHours(totalHours)}`);
+    lines.push(`סה"כ נותר לשלם: ${money(totalRemaining)}`);
+    copyToClipboard(lines.join('\n'));
+  };
   document.getElementById('btn-fprev').onclick = ()=>{ state.flexCloseOffset++; renderFlexClose(); };
   document.getElementById('btn-fnext').onclick = ()=>{ if(state.flexCloseOffset>0){ state.flexCloseOffset--; renderFlexClose(); } };
   root.querySelectorAll('[data-ffill]').forEach(b=>b.onclick=()=>{
