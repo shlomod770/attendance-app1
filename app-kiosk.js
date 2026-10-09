@@ -2,6 +2,43 @@ const root = document.getElementById('root');
 let kioskEmployees = [];
 let stream = null;
 let idleTimer = null;
+const lastLocalScan = {};   // per employee id: last successful scan on this kiosk {type:'in'|'out', time:Date}
+
+// ---- Scan cooldown (anti double-scan) ----
+// After a check-in you can't check out for SCAN_COOLDOWN_MS, and vice versa.
+// Nothing is written to `shifts` while blocked. SAME constant/logic exists in
+// app-employee.js AND app-kiosk.js — change both together.
+const SCAN_COOLDOWN_MS = 2 * 60 * 1000;
+
+// Latest real check-in / check-out event among the given shift docs (manual entries ignored).
+function lastScanEvent(docs){
+  let best = null;
+  docs.forEach(d=>{
+    const s = d.data();
+    if(s.manualTotalHours != null) return;
+    const tIn  = s.checkIn  && s.checkIn.toDate  ? s.checkIn.toDate()  : null;
+    const tOut = s.checkOut && s.checkOut.toDate ? s.checkOut.toDate() : null;
+    if(tIn  && (!best || tIn  >  best.time)) best = { type:'in',  time:tIn  };
+    if(tOut && (!best || tOut >= best.time)) best = { type:'out', time:tOut };
+  });
+  return best;
+}
+
+// Returns {type,time,remainingMs} if the person is still inside the cooldown window, else null.
+// localLast = last successful scan done on THIS device (covers the moment before Firestore data refreshes).
+function cooldownBlock(docs, localLast, now){
+  let last = lastScanEvent(docs);
+  if(localLast && (!last || localLast.time > last.time)) last = localLast;
+  if(!last) return null;
+  const elapsed = now - last.time;
+  if(elapsed < 0 || elapsed >= SCAN_COOLDOWN_MS) return null;
+  return { type: last.type, time: last.time, remainingMs: SCAN_COOLDOWN_MS - elapsed };
+}
+
+function waitText(ms){
+  const m = Math.max(1, Math.ceil(ms / 60000));
+  return m === 1 ? '1 минута' : `${m} минути`;
+}
 
 function toast(msg){
   const t = document.createElement('div');
@@ -157,11 +194,17 @@ function renderConfirm(emp){
       </div>
     </div>
   `;
-  document.getElementById('btn-yes').onclick = ()=>{
+  document.getElementById('btn-yes').onclick = guard(async ()=>{
+    // Check the cooldown BEFORE opening the camera, so nobody wastes a photo.
+    try{
+      const snap = await db.collection('shifts').where('employeeId','==', emp.id).get();
+      const block = cooldownBlock(snap.docs, lastLocalScan[emp.id], new Date());
+      if(block){ showBlocked(emp, block, null); return; }
+    }catch(e){ /* if the check fails, processScanKiosk checks again after the photo */ }
     capturePhotoFlow(emp.name, emp.profilePhoto, async (photo)=>{
       await processScanKiosk(emp, photo);
     });
-  };
+  });
   document.getElementById('btn-no').onclick = renderPicker;
 }
 
@@ -307,6 +350,8 @@ function renderPreviewScreen(subjectLabel, photo, onPhoto){
 async function processScanKiosk(emp, photo){
   const now = new Date();
   const allSnap = await db.collection('shifts').where('employeeId','==', emp.id).get();
+  const block = cooldownBlock(allSnap.docs, lastLocalScan[emp.id], now);
+  if(block){ showBlocked(emp, block, photo); return; }
   const openDocs = allSnap.docs
     .filter(d => !d.data().checkOut && d.data().checkIn && d.data().manualTotalHours == null)
     .sort((a,b) => b.data().checkIn.toMillis() - a.data().checkIn.toMillis());
@@ -319,7 +364,7 @@ async function processScanKiosk(emp, photo){
       checkOut: null, needsReview:false, note:'', source:'kiosk',
       ...((emp.pendingApproval || !emp.hourlyRate) ? {} : { rateAtEntry: emp.hourlyRate })
     });
-    showResult(true, emp.name, now);
+    showResult(true, emp.name, now, null, emp.id, photo);
     return;
   }
   const openDoc = openDocs[0];
@@ -335,7 +380,7 @@ async function processScanKiosk(emp, photo){
     checkOut: firebase.firestore.FieldValue.serverTimestamp(),
     checkOutPhoto: photo
   });
-  showResult(false, emp.name, now, checkIn);
+  showResult(false, emp.name, now, checkIn, emp.id, photo);
 }
 
 // Same idea as the phone app: don't guess, ask the person directly.
@@ -358,7 +403,7 @@ function showLongShiftChoiceKiosk(emp, openDoc, checkIn, now, photo){
       checkOutPhoto: photo,
       needsReview: true
     });
-    showResult(false, emp.name, now, checkIn);
+    showResult(false, emp.name, now, checkIn, emp.id, photo);
   });
   document.getElementById('btn-choice-newshift').onclick = guard(async ()=>{
     root.innerHTML = `<div class="card center"><p class="muted">Записване...</p></div>`;
@@ -370,26 +415,51 @@ function showLongShiftChoiceKiosk(emp, openDoc, checkIn, now, photo){
       checkOut: null, needsReview:false, note:'', source:'kiosk',
       ...((emp.pendingApproval || !emp.hourlyRate) ? {} : { rateAtEntry: emp.hourlyRate })
     });
-    showResult(true, emp.name, now);
+    showResult(true, emp.name, now, null, emp.id, photo);
   });
 }
 
-function showResult(isCheckIn, name, now, checkIn){
-  const title = isCheckIn ? 'Влизането е регистрирано ✓' : 'Излизането е регистрирано ✓';
-  let body = `${name}<br>Час: ${fmtTime(now)}`;
+function showResult(isCheckIn, name, now, checkIn, empId, photo){
+  if(empId) lastLocalScan[empId] = { type: isCheckIn ? 'in' : 'out', time: now };   // feeds the cooldown
+  const title = isCheckIn ? `Влязохте в ${fmtTime(now)}` : `Излязохте в ${fmtTime(now)}`;
+  const hint  = isCheckIn ? 'Готово! Вече сте записани.' : 'Готово! Излизането е записано.';
+  let body = '';
   if(!isCheckIn && checkIn){
     const h = Math.floor((now-checkIn)/3600000);
     const m = Math.round(((now-checkIn)/3600000 - h)*60);
-    body += `<br><b>Общо часове: ${h} ч ${m} мин</b>`;
+    body = `<p class="mono" style="line-height:1.9;font-size:18px;"><b>Общо часове: ${h} ч ${m} мин</b></p>`;
   }
   root.innerHTML = `
-    <div class="card center">
-      <h2 style="font-size:24px;">${title}</h2>
-      <p class="mono" style="line-height:1.9;font-size:16px;">${body}</p>
+    <div class="card center" style="border:3px solid #1e7a3c;">
+      ${photo?`<img src="${photo}" style="width:130px;height:130px;object-fit:cover;border-radius:14px;margin-bottom:6px;">`:''}
+      <div style="font-size:72px;line-height:1;">✅</div>
+      <h2 style="font-size:30px;color:#1e7a3c;margin:10px 0 4px;">${title}</h2>
+      <p style="font-size:22px;font-weight:700;margin:0 0 6px;">${name}</p>
+      <p style="font-size:20px;font-weight:700;margin:0 0 10px;">${hint}</p>
+      ${body}
+      <p class="muted">Не е нужно да сканирате отново. Връщане към началния екран...</p>
+    </div>
+  `;
+  setTimeout(renderMain, 5000);
+}
+
+// Shown when someone tries again too soon. Nothing is written to the database.
+function showBlocked(emp, block, photo){
+  const wait = waitText(block.remainingMs);
+  const msg = block.type === 'in'
+    ? `Току-що влязохте в ${fmtTime(block.time)}.<br>Ако искате да излезете, изчакайте още ${wait}.`
+    : `Току-що излязохте в ${fmtTime(block.time)}.<br>Ако искате да влезете отново, изчакайте още ${wait}.`;
+  const pic = photo || emp.profilePhoto;
+  root.innerHTML = `
+    <div class="card center" style="border:3px solid #c77d00;">
+      ${pic?`<img src="${pic}" style="width:130px;height:130px;object-fit:cover;border-radius:14px;margin-bottom:6px;">`:''}
+      <div style="font-size:64px;line-height:1;">⏳</div>
+      <h2 style="font-size:24px;margin:10px 0;">${emp.name} — вече сте записани</h2>
+      <p style="font-size:20px;line-height:1.6;">${msg}</p>
       <p class="muted">Връщане към началния екран...</p>
     </div>
   `;
-  setTimeout(renderMain, 4000);
+  setTimeout(renderMain, 6000);
 }
 
 renderMain();
