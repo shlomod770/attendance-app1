@@ -732,22 +732,39 @@ function renderPayroll(){
       `${fmtDateHe(weekStart)} – ${fmtDateHe(addDays(weekStart,6))}`,
       ''
     ];
+    const thisKeyC = periodKeyOf(weekStart);
     rows.forEach(r=>{
+      // payments already given during THIS week (not the advance that came from last week's closing)
+      const midPays = (r.payments || []).filter(p=>!(p.note==='מקדמה' && p.periodKey===thisKeyC));
+      const midTotal = midPays.reduce((sum,p)=>sum+(p.amount||0),0);
       lines.push(`👤 ${displayName(r.emp)}`);
-      lines.push(`   שעות: ${fmtHours(r.hours)}`);
-      lines.push(`   השבוע: ${money(r.netThisWeek)}`);
+      lines.push(`   🕒 שעות שעבד: ${fmtHours(r.hours)}`);
+      lines.push(`   💰 מגיע על העבודה: ${money(r.earned)}`);
+      if(midPays.length){
+        lines.push(`   ➖ כבר קיבל השבוע: ${money(midTotal)}`);
+        midPays.forEach(p=>{
+          const d = p.date && p.date.toDate ? p.date.toDate() : new Date(p.date);
+          lines.push(`        • ${fmtDateHe(d)}: ${money(p.amount)}${p.note?' — '+p.note:''}`);
+        });
+      }
+      if(r.advIn > 0.005) lines.push(`   ➖ מקדמה שקיבל מראש (מהשבוע הקודם): ${money(r.advIn)}`);
       if(Math.abs(r.carryover) > 0.005){
         lines.push(r.carryover>0
-          ? `   ⚠️ חוב ישן: ${money(r.carryover)}`
-          : `   ✅ מקדמה ביתר (זכות): ${money(Math.abs(r.carryover))}`);
+          ? `   ⚠️ חוב מהעבר: ${money(r.carryover)}`
+          : `   ✅ מקדמה/זכות מהעבר: ${money(Math.abs(r.carryover))}`);
       }
-      if(r.advIn > 0.005) lines.push(`   ⏩ כולל מקדמה מהשבוע הקודם: ${money(r.advIn)}`);
-      if(r.advNext > 0.005) lines.push(`   ⏩ ניתנה מקדמה: ${money(r.advNext)} (תורד מהשבוע הבא)`);
-      lines.push(`   💶 לתשלום עכשיו: ${money(Math.max(0,r.totalToPayNow))}`);
+      // visible arithmetic: earned - already paid +/- old balance = to give now
+      let calc = `${money(r.earned)}`;
+      if(r.paid > 0.005) calc += ` − ${money(r.paid)} (כבר שולם)`;
+      if(r.carryover > 0.005) calc += ` + ${money(r.carryover)} (חוב)`;
+      else if(r.carryover < -0.005) calc += ` − ${money(Math.abs(r.carryover))} (זכות)`;
+      lines.push(`   🧮 ${calc}`);
+      lines.push(`   💶 *לתת בפועל עכשיו: ${money(Math.max(0,r.totalToPayNow))}*`);
+      if(r.advNext > 0.005) lines.push(`   ⏩ ניתנה מקדמה ${money(r.advNext)} — תורד מהשבוע הבא`);
       lines.push('');
     });
     lines.push('----------------------------');
-    lines.push(`סה"כ טרי לשבוע: ${money(totalThisWeek)}`);
+    lines.push(`סה"כ לתשלום על השבוע (אחרי מה שכבר ניתן): ${money(totalThisWeek)}`);
     lines.push(`סה"כ לתשלום בפועל (כולל יתרות ישנות): ${money(totalCumulative)}`);
     if(flexibleEmployees.length){
       const flexLines = [];
@@ -1047,26 +1064,31 @@ function renderFlexClose(){
     rows.forEach(r=>{
       const m = r.m;
       lines.push(`👤 ${displayName(r.emp)}`);
-      lines.push(`   שעות ב${label}: ${fmtHours(m.hours)}`);
-      lines.push(`   מגיע על החודש: ${money(m.earned)} (${money(r.emp.hourlyRate)}/שעה)`);
+      lines.push(`   🕒 שעות שעבד ב${label}: ${fmtHours(m.hours)}`);
+      lines.push(`   💰 מגיע על העבודה: ${money(m.earned)} (${money(r.emp.hourlyRate)}/שעה)`);
+      if(r.pays.length){
+        lines.push(`   ➖ כבר קיבל על החודש: ${money(m.paid + m.adjust)}`);
+        r.pays.forEach(p=>{
+          const d = p.date && p.date.toDate ? p.date.toDate() : new Date(p.date);
+          lines.push(`        • ${fmtDateHe(d)}: ${money(p.amount)}${p.isAdjustment?' (סגירת חוב)':''}${p.note?' — '+p.note:''}`);
+        });
+      } else {
+        lines.push(`   ➖ כבר קיבל על החודש: אין`);
+      }
       if(Math.abs(m.carryover) > 0.005){
         lines.push(m.carryover>0
           ? `   ⚠️ חוב מחודשים קודמים: ${money(m.carryover)}`
-          : `   ✅ זכות מחודשים קודמים: ${money(Math.abs(m.carryover))}`);
+          : `   ✅ מקדמה/זכות מחודשים קודמים: ${money(Math.abs(m.carryover))}`);
       } else {
         lines.push(`   ✅ אין חוב מחודשים קודמים`);
       }
-      if(r.pays.length){
-        lines.push(`   תשלומים על החודש:`);
-        r.pays.forEach(p=>{
-          const d = p.date && p.date.toDate ? p.date.toDate() : new Date(p.date);
-          lines.push(`     • ${fmtDateHe(d)}: ${money(p.amount)}${p.isAdjustment?' (סגירת חוב)':''}${p.note?' — '+p.note:''}`);
-        });
-      } else {
-        lines.push(`   תשלומים על החודש: אין`);
-      }
-      lines.push(`   שולם סה"כ: ${money(m.paid + m.adjust)}`);
-      lines.push(`   💶 נותר לשלם: ${money(m.remaining)}`);
+      let calcF = `${money(m.earned)}`;
+      if(m.paid + m.adjust > 0.005) calcF += ` − ${money(m.paid + m.adjust)} (כבר שולם)`;
+      if(m.carryover > 0.005) calcF += ` + ${money(m.carryover)} (חוב)`;
+      else if(m.carryover < -0.005) calcF += ` − ${money(Math.abs(m.carryover))} (זכות)`;
+      lines.push(`   🧮 ${calcF}`);
+      lines.push(`   💶 *לתת בפועל עכשיו: ${money(Math.max(0,m.remaining))}*`);
+      if(m.remaining < -0.005) lines.push(`   ✅ שולם ביתר (מקדמה): ${money(Math.abs(m.remaining))} — יורד מהחודש הבא`);
       lines.push(`   ${prevLabel}: ${fmtHours(r.prev.hours)} שעות · הגיע ${money(r.prev.earned)} · שולם ${money(r.prev.paid)}`);
       lines.push('');
     });
