@@ -531,6 +531,7 @@ const TABS = [
   ['payroll','סגירת שבוע'],
   ['flexClose','סגירת חודש גמיש'],
   ['log','כניסות ויציאות'],
+  ['dayReport','דוח יום'],
   ['exceptions','חריגים'],
   ['employees','עובדים'],
   ['payments','תשלומים'],
@@ -566,6 +567,7 @@ function renderApp(){
   else if(state.tab==='payroll') renderPayroll();
   else if(state.tab==='flexClose') renderFlexClose();
   else if(state.tab==='log') renderLog();
+  else if(state.tab==='dayReport') renderDayReport();
   else if(state.tab==='employees'){
     if(state.detailEmployeeId) renderEmployeeDetail(state.detailEmployeeId);
     else renderEmployees();
@@ -1126,6 +1128,122 @@ function renderFlexClose(){
     await db.collection('payments').add(payload);
     await loadAll(); renderFlexClose(); toast('התשלום נשמר');
   }));
+}
+
+// ---------- day report (דוח יום) ----------
+// Pick a date -> every employee's in/out times that day, hours per employee, and the total
+// hours + wage cost of the day (e.g. "what did this event cost me"). Read-only; uses the
+// existing shiftDurationHours / shiftRate / shiftEarned, so it always matches the rest of the app.
+function renderDayReport(){
+  if(!state.dayReportDate) state.dayReportDate = toInputDate(new Date());
+  if(!state.dayReportOff) state.dayReportOff = {}; // empId -> true when the manager unchecked the employee
+  const dateStr = state.dayReportDate;
+  const dayDate = new Date(dateStr + 'T00:00:00');
+  const dayLabel = dayDate.toLocaleDateString('he-IL',{weekday:'long',day:'2-digit',month:'2-digit',year:'numeric'});
+  const asDate = t => t ? (t.toDate ? t.toDate() : new Date(t)) : null;
+
+  // all shifts whose effective (check-in / manual) date falls on the chosen day
+  const byEmp = {};
+  state.shifts.forEach(sh=>{
+    const d = shiftEffectiveDate(sh);
+    if(!d || isNaN(d) || toInputDate(d) !== dateStr) return;
+    const emp = state.employees.find(e=>e.id===sh.employeeId);
+    if(!emp) return;
+    (byEmp[emp.id] = byEmp[emp.id] || { emp, shifts: [] }).shifts.push(sh);
+  });
+  const startOf = sh => asDate(sh.checkIn) || asDate(sh.scheduledStart) || shiftEffectiveDate(sh);
+  const groups = Object.values(byEmp).map(g=>{
+    g.shifts.sort((a,b)=>startOf(a)-startOf(b));
+    g.hours = g.shifts.reduce((sum,sh)=>sum+shiftDurationHours(sh),0);
+    g.cost  = g.shifts.reduce((sum,sh)=>sum+shiftEarned(sh,g.emp),0);
+    g.open  = g.shifts.some(sh=>sh.manualTotalHours == null && !sh.checkOut);
+    return g;
+  }).sort((a,b)=>displayName(a.emp).localeCompare(displayName(b.emp),'he'));
+
+  const shown = groups.filter(g=>!state.dayReportOff[g.emp.id]);
+  const totalHours = shown.reduce((sum,g)=>sum+g.hours,0);
+  const totalCost  = shown.reduce((sum,g)=>sum+g.cost,0);
+
+  const shiftText = sh=>{
+    if(sh.manualTotalHours != null) return `ידני · ${fmtHours(sh.manualTotalHours)} ש'`;
+    const inD = asDate(sh.checkIn) || asDate(sh.scheduledStart);
+    const outD = asDate(sh.checkOut);
+    if(!inD) return '—';
+    if(!outD) return `${fmtTimeHe(inD)} – (עדיין לא יצא)`;
+    const nextDay = toInputDate(outD) !== toInputDate(inD) ? ' (למחרת)' : '';
+    return `${fmtTimeHe(inD)} – ${fmtTimeHe(outD)}${nextDay} · ${fmtHours(shiftDurationHours(sh))} ש'`;
+  };
+
+  root.innerHTML = `
+    <div class="card">
+      <h2>דוח יום</h2>
+      <div class="nav-period">
+        <button id="btn-dprev">›</button>
+        <div class="period-label"><b>${dayLabel}</b></div>
+        <button id="btn-dnext">‹</button>
+      </div>
+      <div class="row" style="margin-top:8px;gap:8px;align-items:center;">
+        <input id="dr-date" type="date" value="${dateStr}" style="flex:1;">
+        <button class="btn btn-ghost btn-sm" id="btn-dtoday">היום</button>
+      </div>
+    </div>
+
+    ${groups.length ? `
+    <div class="card">
+      <div class="row between"><b style="font-size:14px;">אילו עובדים לכלול</b>
+        <span><button class="btn btn-ghost btn-sm" id="btn-dall">הכל</button> <button class="btn btn-ghost btn-sm" id="btn-dnone">אף אחד</button></span>
+      </div>
+      <div style="margin-top:6px;">
+        ${groups.map(g=>`<label style="display:flex;align-items:center;gap:8px;margin:4px 0;font-size:14px;">
+          <input type="checkbox" data-dr-emp="${g.emp.id}" ${state.dayReportOff[g.emp.id]?'':'checked'} style="width:auto;">
+          <span>${displayName(g.emp)}</span><span class="muted" style="font-size:12px;">· ${fmtHours(g.hours)} ש'</span>
+        </label>`).join('')}
+      </div>
+    </div>
+
+    <div class="card" style="background:var(--paper-2);">
+      <div class="row between"><span>עובדים</span><b>${shown.length}</b></div>
+      <div class="row between"><span>סה"כ שעות</span><b class="mono" style="font-size:18px;">${fmtHours(totalHours)}</b></div>
+      <div class="row between"><span>סה"כ עלות שכר</span><b class="mono" style="font-size:18px;">${money(totalCost)}</b></div>
+      <button class="btn btn-brass btn-sm" id="btn-dcopy" style="margin-top:10px;">📋 העתקת סיכום (לוואטסאפ/מייל)</button>
+    </div>
+
+    ${shown.map(g=>`
+      <div class="card" style="padding:12px 14px;">
+        <div class="row between"><b>${displayName(g.emp)}</b><span class="mono"><b>${fmtHours(g.hours)}</b> ש' · ${money(g.cost)}</span></div>
+        ${g.shifts.map(sh=>`<div style="font-size:13px;margin-top:4px;" class="${(sh.manualTotalHours==null && !sh.checkOut)?'':''}">• ${shiftText(sh)}${(sh.manualTotalHours==null && !sh.checkOut)?' <span class="tag tag-open">פתוחה — לא נספרה</span>':''}</div>`).join('')}
+      </div>`).join('')}
+    <p class="muted" style="font-size:11px;">עלות שכר = שעות × תעריף שהיה בתוקף בכניסה, בלי טיפים. משמרת פתוחה (בלי יציאה) לא נספרת. משמרת שמתחילה בלילה נספרת ליום הכניסה.</p>
+    ` : `<div class="card"><p class="muted">אין כניסות ביום הזה.</p></div>`}
+  `;
+
+  const go = d=>{ state.dayReportDate = d; renderDayReport(); };
+  document.getElementById('btn-dprev').onclick = ()=>go(toInputDate(addDays(dayDate,-1)));
+  document.getElementById('btn-dnext').onclick = ()=>go(toInputDate(addDays(dayDate,1)));
+  document.getElementById('btn-dtoday').onclick = ()=>go(toInputDate(new Date()));
+  document.getElementById('dr-date').onchange = (ev)=>{ if(ev.target.value) go(ev.target.value); };
+  if(!groups.length) return;
+  root.querySelectorAll('[data-dr-emp]').forEach(cb=>cb.onchange=()=>{
+    if(cb.checked) delete state.dayReportOff[cb.dataset.drEmp]; else state.dayReportOff[cb.dataset.drEmp] = true;
+    renderDayReport();
+  });
+  document.getElementById('btn-dall').onclick = ()=>{ state.dayReportOff = {}; renderDayReport(); };
+  document.getElementById('btn-dnone').onclick = ()=>{ groups.forEach(g=>state.dayReportOff[g.emp.id]=true); renderDayReport(); };
+  document.getElementById('btn-dcopy').onclick = ()=>{
+    if(!shown.length){ toast('לא נבחרו עובדים'); return; }
+    const lines = [`📅 *דוח יום — ${dayLabel}*`, ''];
+    shown.forEach(g=>{
+      lines.push(`👤 ${displayName(g.emp)}`);
+      g.shifts.forEach(sh=>lines.push(`   • ${shiftText(sh)}${(sh.manualTotalHours==null && !sh.checkOut)?' ⚠️ לא נספרה':''}`));
+      lines.push(`   סה"כ: ${fmtHours(g.hours)} ש' · ${money(g.cost)}`);
+      lines.push('');
+    });
+    lines.push('----------------------------');
+    lines.push(`עובדים: ${shown.length}`);
+    lines.push(`סה"כ שעות: ${fmtHours(totalHours)}`);
+    lines.push(`💶 סה"כ עלות שכר: ${money(totalCost)}`);
+    copyToClipboard(lines.join('\n'));
+  };
 }
 
 // ---------- employees list ----------
