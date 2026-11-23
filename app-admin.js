@@ -1414,6 +1414,7 @@ function renderNewEmployees(){
       <div class="row" style="margin-top:10px;">
         <button class="btn btn-brass btn-sm" data-approve="${e.id}">אישור והעברה לרשימה הפעילה</button>
         <button class="btn btn-ghost btn-sm" data-edit="${e.id}">עריכת פרטים / תמונה</button>
+        <button class="btn btn-ghost btn-sm" data-merge="${e.id}">🔀 מיזוג לעובד קיים</button>
         <button class="btn btn-danger btn-sm" data-reject="${e.id}">מחיקה</button>
       </div>
     </div>
@@ -1427,11 +1428,129 @@ function renderNewEmployees(){
     await loadAll(); renderApp(); toast('העובד אושר');
   }));
   list.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>openEmployeeForm(b.dataset.edit));
+  list.querySelectorAll('[data-merge]').forEach(b=>b.onclick=()=>openMergeForm(b.dataset.merge));
   list.querySelectorAll('[data-reject]').forEach(b=>b.onclick=guard(async()=>{
     if(!confirm('למחוק את הרישום הזה לגמרי?')) return;
     await db.collection('employees').doc(b.dataset.reject).delete();
     await loadAll(); renderApp();
   }));
+}
+
+// ---------- merge a new (pending) employee into an existing one ----------
+// Moves the new record's shifts / payments / notes to an existing employee, optionally copies
+// chosen details, re-prices the moved shifts at the existing employee's rate, then deletes (or
+// archives) the new record. Moved documents get `mergedFrom` (and `rateBeforeMerge` when
+// re-priced) so it is traceable. NOT reversible from the UI.
+function openMergeForm(srcId){
+  const src = state.employees.find(e=>e.id===srcId);
+  if(!src){ renderNewEmployees(); return; }
+  const targets = [
+    ...sortByCustomOrder(state.employees.filter(e=>e.id!==srcId && !e.pendingApproval && e.active!==false)),
+    ...state.employees.filter(e=>e.id!==srcId && !e.pendingApproval && e.active===false)
+  ];
+  if(!targets.length){ toast('אין עובד קיים למזג אליו'); return; }
+
+  const srcShifts = state.shifts.filter(x=>x.employeeId===srcId);
+  const srcPays   = state.payments.filter(x=>x.employeeId===srcId);
+  const srcNotes  = state.notes.filter(x=>x.employeeId===srcId);
+  const srcOpen   = srcShifts.filter(x=>x.manualTotalHours==null && !x.checkOut).length;
+  const srcHours  = srcShifts.reduce((sum,x)=>sum+shiftDurationHours(x),0);
+  const FIELDS = [['name','שם (כפי שמוצג)'],['nameHe','שם בעברית'],['profilePhoto','תמונת פרופיל']];
+
+  root.innerHTML = `
+    <div class="card">
+      <h2>🔀 מיזוג עובד חדש לעובד קיים</h2>
+      <p class="muted" style="font-size:13px;">מעבירים את הרישום החדש <b>${src.name}</b> לעובד שכבר קיים אצלכם, כדי שהכניסות והתשלומים יהיו במקום אחד תחת תעריף אחד. <b>הפעולה לא ניתנת לביטול</b> — מומלץ לייצא גיבוי לפני (הגדרות).</p>
+      <div class="row between"><span>בעובד החדש יש:</span><b>${srcShifts.length} משמרות · ${fmtHours(srcHours)} ש' · ${srcPays.length} תשלומים · ${srcNotes.length} הערות</b></div>
+      ${srcOpen?`<p style="color:var(--danger,#b3402a);font-size:13px;margin:6px 0 0;">⚠️ ${srcOpen} משמרת פתוחה (בלי יציאה) — היא תעבור לעובד הקיים וייתכן שתצטרכו לסגור אותה.</p>`:''}
+      <label>למי למזג? (העובד הקיים)</label>
+      <select id="m-target">
+        <option value="">— בחרו עובד —</option>
+        ${targets.map(t=>`<option value="${t.id}">${displayName(t)}${t.active===false?' (בארכיון)':''} · ${money(t.hourlyRate)}/שעה</option>`).join('')}
+      </select>
+    </div>
+    <div id="m-body"></div>
+    <div class="card"><button class="btn btn-ghost" id="m-cancel">ביטול</button></div>
+  `;
+  document.getElementById('m-cancel').onclick = ()=>renderNewEmployees();
+  const sel = document.getElementById('m-target');
+  const body = document.getElementById('m-body');
+
+  const renderBody = ()=>{
+    const tgt = state.employees.find(e=>e.id===sel.value);
+    if(!tgt){ body.innerHTML = ''; return; }
+    const fieldRows = FIELDS.filter(([f])=>src[f]).map(([f,label])=>{
+      const sv = f==='profilePhoto' ? `<img src="${src[f]}" style="width:44px;height:44px;object-fit:cover;border-radius:8px;">` : `<b>${src[f]}</b>`;
+      const tv = tgt[f] ? (f==='profilePhoto' ? `<img src="${tgt[f]}" style="width:44px;height:44px;object-fit:cover;border-radius:8px;">` : tgt[f]) : '<span class="muted">— ריק —</span>';
+      return `<label style="display:flex;align-items:center;gap:8px;margin:6px 0;font-size:13px;">
+        <input type="checkbox" data-m-field="${f}" ${tgt[f]?'':'checked'} style="width:auto;">
+        <span style="flex:1;">${label}<br><span class="muted" style="font-size:12px;">חדש: </span>${sv} <span class="muted" style="font-size:12px;">· קיים: </span>${tv}</span>
+      </label>`;
+    }).join('');
+    body.innerHTML = `
+      <div class="card">
+        <b>מה להעביר?</b>
+        <label style="display:flex;gap:8px;align-items:center;margin:8px 0 4px;"><input type="checkbox" id="m-shifts" checked style="width:auto;"><span>כניסות ויציאות (${srcShifts.length})</span></label>
+        <label style="display:flex;gap:8px;align-items:center;margin:4px 0;"><input type="checkbox" id="m-pays" checked style="width:auto;"><span>תשלומים (${srcPays.length})</span></label>
+        <label style="display:flex;gap:8px;align-items:center;margin:4px 0;"><input type="checkbox" id="m-notes" checked style="width:auto;"><span>הערות שהעובד שלח (${srcNotes.length})</span></label>
+        <div style="margin-top:10px;padding:8px 10px;background:var(--paper-2);border-radius:10px;font-size:13px;">
+          <b>תעריף למשמרות שמועברות</b>
+          <label style="display:flex;gap:8px;align-items:center;margin:6px 0;"><input type="radio" name="m-rate" value="target" checked style="width:auto;"><span>לפי התעריף של ${displayName(tgt)}: <b>${money(tgt.hourlyRate)}/שעה</b></span></label>
+          <label style="display:flex;gap:8px;align-items:center;margin:6px 0;"><input type="radio" name="m-rate" value="keep" style="width:auto;"><span>להשאיר את התעריף שנרשם במשמרות (בדרך כלל ${money(src.hourlyRate)})</span></label>
+        </div>
+      </div>
+      ${fieldRows ? `<div class="card"><b>אילו פרטים להעתיק לעובד הקיים?</b><p class="muted" style="font-size:12px;margin:2px 0 0;">מסומן אוטומטית רק מה שחסר אצל העובד הקיים. שאר פרטי העובד הקיים (תעריף, קוד, שם משתמש) לא משתנים.</p>${fieldRows}</div>` : ''}
+      <div class="card">
+        <b>מה לעשות עם הרישום החדש אחרי המיזוג?</b>
+        <label style="display:flex;gap:8px;align-items:center;margin:6px 0;"><input type="radio" name="m-finish" value="delete" checked style="width:auto;"><span>למחוק אותו (מומלץ)</span></label>
+        <label style="display:flex;gap:8px;align-items:center;margin:6px 0;"><input type="radio" name="m-finish" value="archive" style="width:auto;"><span>להשאיר בארכיון (מושבת)</span></label>
+        <button class="btn btn-brass" id="m-go" style="margin-top:8px;">בצע מיזוג</button>
+      </div>`;
+    document.getElementById('m-go').onclick = guard(async()=>{
+      const moveShifts = document.getElementById('m-shifts').checked;
+      const movePays   = document.getElementById('m-pays').checked;
+      const moveNotes  = document.getElementById('m-notes').checked;
+      const reprice    = document.querySelector('input[name="m-rate"]:checked').value;
+      const finish     = document.querySelector('input[name="m-finish"]:checked').value;
+      const fields     = [...body.querySelectorAll('[data-m-field]')].filter(c=>c.checked).map(c=>c.dataset.mField);
+      // never delete a record that still owns data — it would be orphaned
+      if(finish==='delete' && !(moveShifts && movePays && moveNotes)){
+        toast('כדי למחוק את הרישום החדש צריך להעביר גם כניסות, גם תשלומים וגם הערות (או לבחור ארכיון)'); return;
+      }
+      const lines = [];
+      if(moveShifts) lines.push(`${srcShifts.length} משמרות`);
+      if(movePays) lines.push(`${srcPays.length} תשלומים`);
+      if(moveNotes) lines.push(`${srcNotes.length} הערות`);
+      if(!confirm(`למזג את "${src.name}" לתוך "${displayName(tgt)}"?\n\nיועברו: ${lines.join(', ')||'כלום'}${fields.length?`\nפרטים שיועתקו: ${fields.join(', ')}`:''}\nהרישום החדש: ${finish==='delete'?'יימחק':'יועבר לארכיון'}\n\nלא ניתן לבטל.`)) return;
+
+      const writes = [];
+      if(moveShifts) srcShifts.forEach(x=>{
+        const upd = { employeeId: tgt.id, mergedFrom: srcId };
+        if(reprice==='target'){ upd.rateBeforeMerge = x.rateAtEntry!=null ? x.rateAtEntry : null; upd.rateAtEntry = tgt.hourlyRate || 0; }
+        writes.push(['update', db.collection('shifts').doc(x.id), upd]);
+      });
+      if(movePays) srcPays.forEach(x=>writes.push(['update', db.collection('payments').doc(x.id), { employeeId: tgt.id, mergedFrom: srcId }]));
+      if(moveNotes) srcNotes.forEach(x=>writes.push(['update', db.collection('notes').doc(x.id), { employeeId: tgt.id, mergedFrom: srcId }]));
+      if(fields.length){
+        const upd = {}; fields.forEach(f=>{ upd[f] = src[f]; });
+        writes.push(['update', db.collection('employees').doc(tgt.id), upd]);
+      }
+      // the new record goes LAST: if anything fails earlier it still exists and the merge can simply be run again
+      if(finish==='delete') writes.push(['delete', db.collection('employees').doc(srcId)]);
+      else writes.push(['update', db.collection('employees').doc(srcId), { active:false, pendingApproval: firebase.firestore.FieldValue.delete() }]);
+
+      for(let i=0;i<writes.length;i+=400){
+        const batch = db.batch();
+        writes.slice(i,i+400).forEach(([op,ref,data])=>{ if(op==='delete') batch.delete(ref); else batch.update(ref,data); });
+        await batch.commit();
+      }
+      await loadAll();
+      state.tab = 'employees'; state.detailEmployeeId = tgt.id;
+      renderApp();
+      toast('המיזוג הושלם');
+    });
+  };
+  sel.onchange = renderBody;
 }
 
 function openEmployeeForm(empId){
